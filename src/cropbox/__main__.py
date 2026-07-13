@@ -1,17 +1,100 @@
+# SPDX-License-Identifier: BSD-3-Clause
+
 import argparse
+from typing import Optional
+
+from cropbox.models.crop_rect import CropRect
+from cropbox.models.trim_range import TrimRange
 
 
-def _parse_args() -> argparse.Namespace:
+def _parse_time_value(value: str) -> float:
+    text = value.strip()
+    if not text:
+        raise ValueError("time value cannot be empty")
+
+    if ":" not in text:
+        return max(0.0, float(text))
+
+    parts = text.split(":")
+    if len(parts) > 3:
+        raise ValueError("time value must be in SS, MM:SS, or HH:MM:SS form")
+
+    seconds = float(parts[-1])
+    minutes = int(parts[-2]) if len(parts) >= 2 else 0
+    hours = int(parts[-3]) if len(parts) == 3 else 0
+    return max(0.0, seconds + (minutes * 60) + (hours * 3600))
+
+
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cropbox")
     parser.add_argument("media", nargs="?", help="Optional media path to open on launch")
-    return parser.parse_args()
+    parser.add_argument(
+        "--trim-in",
+        dest="trim_in",
+        help="Initial trim-in time in seconds or HH:MM:SS.mmm format",
+    )
+    parser.add_argument(
+        "--trim-out",
+        dest="trim_out",
+        help="Initial trim-out time in seconds or HH:MM:SS.mmm format",
+    )
+    parser.add_argument(
+        "--crop",
+        nargs=4,
+        metavar=("X", "Y", "WIDTH", "HEIGHT"),
+        type=int,
+        help="Initial crop rectangle in source pixels",
+    )
+    return parser
+
+
+def _build_initial_trim(
+    args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> Optional[TrimRange]:
+    if args.trim_in is None and args.trim_out is None:
+        return None
+
+    try:
+        trim_in = _parse_time_value(args.trim_in) if args.trim_in is not None else 0.0
+        trim_out = _parse_time_value(args.trim_out) if args.trim_out is not None else trim_in
+    except ValueError as exc:
+        parser.error(str(exc))
+        return None
+
+    return TrimRange(start=trim_in, end=trim_out)
+
+
+def _build_initial_crop(
+    args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> Optional[CropRect]:
+    if args.crop is None:
+        return None
+
+    x, y, width, height = args.crop
+    if width <= 0 or height <= 0:
+        parser.error("crop width and height must be positive integers")
+        return None
+    if x < 0 or y < 0:
+        parser.error("crop x and y must be zero or greater")
+        return None
+    return CropRect(x=x, y=y, width=width, height=height)
 
 
 def main() -> int:
-    args = _parse_args()
+    parser = _build_parser()
+    args = parser.parse_args()
+    if args.media is None and (args.trim_in is not None or args.trim_out is not None or args.crop):
+        parser.error("media path is required when using --trim-in, --trim-out, or --crop")
+
+    initial_trim = _build_initial_trim(args, parser)
+    initial_crop = _build_initial_crop(args, parser)
     from cropbox.app import main as run_app
 
-    return run_app(initial_media=args.media)
+    return run_app(
+        initial_media=args.media,
+        initial_trim=initial_trim,
+        initial_crop=initial_crop,
+    )
 
 
 if __name__ == "__main__":

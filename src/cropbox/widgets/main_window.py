@@ -1,8 +1,8 @@
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 
 from PySide6.QtCore import QEvent, Qt, QUrl
-from PySide6.QtGui import QAction, QImage, QKeySequence, QMovie, QShortcut
+from PySide6.QtGui import QAction, QActionGroup, QIcon, QImage, QKeySequence, QMovie, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame, QVideoSink
 from PySide6.QtWidgets import (
     QDialog,
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from cropbox import __version__
 from cropbox.media.commands import build_export_command
+from cropbox.media.dependencies import missing_media_tools
 from cropbox.media.exporter import Exporter
 from cropbox.media.probe import ProbeError, probe_media
 from cropbox.models.crop_rect import CropRect
@@ -148,7 +149,21 @@ class TrimValueDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, initial_media_path: Optional[Path] = None) -> None:
+    PLAYBACK_SPEEDS = (
+        ("3x", 3.0),
+        ("2x", 2.0),
+        ("1x", 1.0),
+        ("0.75x", 0.75),
+        ("0.5x", 0.5),
+        ("0.25x", 0.25),
+    )
+
+    def __init__(
+        self,
+        initial_media_path: Optional[Path] = None,
+        initial_trim: Optional[TrimRange] = None,
+        initial_crop: Optional[CropRect] = None,
+    ) -> None:
         super().__init__()
         self.setWindowTitle("Cropbox")
         self.resize(1200, 760)
@@ -167,11 +182,17 @@ class MainWindow(QMainWindow):
         self._loop_playback = True
         self._gif_movie: Optional[QMovie] = None
         self._gif_position_ms = 0
+        self._playback_rate = 1.0
+        self._missing_tools = missing_media_tools()
+        self._playback_speed_actions: Dict[float, QAction] = {}
+        self._initial_trim = initial_trim
+        self._initial_crop = initial_crop
 
         self._build_ui()
         self._build_menus()
         self._wire_signals()
         self._update_controls_for_session()
+        self._warn_missing_media_tools()
 
         if initial_media_path is not None:
             self._load_media(initial_media_path)
@@ -200,14 +221,6 @@ class MainWindow(QMainWindow):
         self.crop_overlay.raise_()
         self.crop_overlay.hide()
 
-        self.trim_in_label = QLabel("In: 00:00:00.000 (frame 0)", self)
-        self.trim_out_label = QLabel("Out: 00:00:00.000 (frame 0)", self)
-
-        labels_row = QHBoxLayout()
-        labels_row.addWidget(self.trim_in_label)
-        labels_row.addStretch(1)
-        labels_row.addWidget(self.trim_out_label)
-
         self.timeline_widget = TimelineWidget(self)
 
         self.play_button = QToolButton(self)
@@ -216,19 +229,19 @@ class MainWindow(QMainWindow):
 
         self.mute_button = QToolButton(self)
         self.mute_button.setToolTip("Toggle mute")
+        self.mute_button.setAutoRaise(False)
 
         self.position_label = QLabel("00:00:00.000", self)
 
         transport_row = QHBoxLayout()
         transport_row.addWidget(self.timeline_widget, stretch=1)
-        transport_row.addSpacing(12)
+        transport_row.addSpacing(10)
         transport_row.addWidget(self.position_label)
         transport_row.addWidget(self.mute_button)
         transport_row.addWidget(self.play_button)
 
         layout = QVBoxLayout(central)
         layout.addWidget(self.video_container, stretch=1)
-        layout.addLayout(labels_row)
         layout.addLayout(transport_row)
 
         central.setStyleSheet(
@@ -275,6 +288,7 @@ class MainWindow(QMainWindow):
         file_menu = self.menuBar().addMenu("File")
         edit_menu = self.menuBar().addMenu("Edit")
         help_menu = self.menuBar().addMenu("Help")
+        playback_speed_menu = edit_menu.addMenu("Playback Speed")
 
         open_action = QAction("Open", self)
         open_action.setShortcut(QKeySequence.Open)
@@ -308,8 +322,24 @@ class MainWindow(QMainWindow):
         self.loop_playback_action.setChecked(True)
         self.loop_playback_action.toggled.connect(self._set_loop_playback)
 
+        self.playback_speed_group = QActionGroup(self)
+        self.playback_speed_group.setExclusive(True)
+        for label, rate in self.PLAYBACK_SPEEDS:
+            action = QAction(label, self)
+            action.setCheckable(True)
+            if rate == self._playback_rate:
+                action.setChecked(True)
+            action.triggered.connect(
+                lambda checked=False, selected_rate=rate: self.set_playback_rate(selected_rate)
+            )
+            self.playback_speed_group.addAction(action)
+            playback_speed_menu.addAction(action)
+            self._playback_speed_actions[rate] = action
+
         about_action = QAction("About Cropbox", self)
         about_action.triggered.connect(self.show_about_dialog)
+        install_ffmpeg_action = QAction("Install FFmpeg", self)
+        install_ffmpeg_action.triggered.connect(self.show_ffmpeg_install_dialog)
 
         file_menu.addAction(open_action)
         file_menu.addAction(save_as_action)
@@ -325,11 +355,23 @@ class MainWindow(QMainWindow):
         edit_menu.addSeparator()
         edit_menu.addAction(self.loop_playback_action)
 
+        help_menu.addAction(install_ffmpeg_action)
+        help_menu.addSeparator()
         help_menu.addAction(about_action)
 
         QShortcut(QKeySequence(Qt.Key_Space), self, activated=self.toggle_play_pause)
-        QShortcut(QKeySequence(Qt.Key_Left), self, activated=lambda: self._handle_left_right(-1))
-        QShortcut(QKeySequence(Qt.Key_Right), self, activated=lambda: self._handle_left_right(1))
+        QShortcut(QKeySequence(Qt.Key_Left), self, activated=lambda: self.step_frame(-1))
+        QShortcut(QKeySequence(Qt.Key_Right), self, activated=lambda: self.step_frame(1))
+        QShortcut(
+            QKeySequence(Qt.SHIFT | Qt.Key_Left),
+            self,
+            activated=lambda: self._nudge_trim_handle(-1),
+        )
+        QShortcut(
+            QKeySequence(Qt.SHIFT | Qt.Key_Right),
+            self,
+            activated=lambda: self._nudge_trim_handle(1),
+        )
 
     def _wire_signals(self) -> None:
         self.play_button.clicked.connect(self.toggle_play_pause)
@@ -359,7 +401,40 @@ class MainWindow(QMainWindow):
         self.loop_playback_action.setEnabled(enabled)
         self.mute_button.setEnabled(enabled)
 
+    def _warn_missing_media_tools(self) -> None:
+        if not self._missing_tools:
+            return
+        QMessageBox.warning(
+            self,
+            "Missing Media Tools",
+            (
+                "Cropbox requires ffmpeg and ffprobe for probing and export.\n\n"
+                f"Missing: {', '.join(self._missing_tools)}\n\n"
+                "Use Help -> Install FFmpeg for installation guidance."
+            ),
+        )
+
+    def _check_media_tools(self, tools: Optional[List[str]] = None) -> bool:
+        current_missing = set(missing_media_tools())
+        if tools is not None:
+            current_missing = {tool for tool in current_missing if tool in tools}
+        if not current_missing:
+            self._missing_tools = []
+            return True
+
+        QMessageBox.warning(
+            self,
+            "Missing Media Tools",
+            (
+                f"Cropbox requires {', '.join(sorted(current_missing))} for this action.\n\n"
+                "Use Help -> Install FFmpeg for installation guidance."
+            ),
+        )
+        return False
+
     def open_media(self) -> None:
+        if not self._check_media_tools(["ffprobe"]):
+            return
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Open Media",
@@ -384,9 +459,14 @@ class MainWindow(QMainWindow):
 
     def _update_mute_button(self) -> None:
         is_muted = self._audio_output.isMuted()
-        icon = QStyle.SP_MediaVolumeMuted if is_muted else QStyle.SP_MediaVolume
-        self.mute_button.setIcon(self.style().standardIcon(icon))
+        self.mute_button.setIcon(QIcon())
+        self.mute_button.setText("Muted" if is_muted else "Audio")
         self.mute_button.setToolTip("Unmute" if is_muted else "Mute")
+
+    def _apply_playback_rate(self) -> None:
+        self._media_player.setPlaybackRate(self._playback_rate)
+        if self._gif_movie is not None:
+            self._gif_movie.setSpeed(int(round(self._playback_rate * 100.0)))
 
     def _stop_gif_movie(self) -> None:
         if self._gif_movie is None:
@@ -444,6 +524,7 @@ class MainWindow(QMainWindow):
         self._gif_movie = movie
         self._gif_position_ms = 0
         self._set_play_icon(False)
+        self._apply_playback_rate()
 
     def _load_media(self, path: Path) -> None:
         if not path.exists():
@@ -462,12 +543,16 @@ class MainWindow(QMainWindow):
             crop=CropRect(x=0, y=0, width=media_info.width, height=media_info.height),
             trim=trim,
         )
+        self._apply_initial_edit_options()
         self._fps = media_info.frame_rate
         self._duration_ms = max(int(media_info.duration * 1000), 0)
 
+        initial_trim = self._session.trim.normalized()
+        trim_in_ms = max(int(initial_trim.start * 1000), 0)
+        trim_out_ms = max(int(initial_trim.end * 1000), 0)
         self.timeline_widget.set_duration(self._duration_ms)
-        self.timeline_widget.set_trim_range(0, self._duration_ms)
-        self.timeline_widget.set_position(0)
+        self.timeline_widget.set_trim_range(trim_in_ms, trim_out_ms)
+        self.timeline_widget.set_position(trim_in_ms)
 
         self.crop_overlay.set_source_size(media_info.width, media_info.height)
         self.crop_overlay.set_crop_rect(self._session.crop)
@@ -482,8 +567,12 @@ class MainWindow(QMainWindow):
         else:
             self._stop_gif_movie()
             self._media_player.setSource(QUrl.fromLocalFile(str(path)))
-            self._media_player.setPosition(0)
+            self._media_player.setPosition(trim_in_ms)
             self._media_player.pause()
+            self._apply_playback_rate()
+
+        if self._is_gif_mode():
+            self._seek_gif(trim_in_ms)
 
         self._audio_output.setMuted(True)
         self._update_mute_button()
@@ -493,11 +582,35 @@ class MainWindow(QMainWindow):
         self._refresh_trim_labels()
         self._update_controls_for_session()
         self._sync_video_overlay_geometry()
-        self.statusBar().showMessage(f"Loaded {path.name}", 2500)
+
+    def _apply_initial_edit_options(self) -> None:
+        if self._session is None:
+            return
+
+        media = self._session.media
+        if self._initial_trim is not None:
+            normalized = self._initial_trim.normalized()
+            start = max(0.0, min(normalized.start, media.duration))
+            end = max(start, min(normalized.end, media.duration))
+            self._session.trim = TrimRange(start=start, end=end)
+            self._initial_trim = None
+
+        if self._initial_crop is not None:
+            crop = self._initial_crop
+            x = max(0, min(crop.x, max(media.width - 1, 0)))
+            y = max(0, min(crop.y, max(media.height - 1, 0)))
+            max_width = max(media.width - x, 1)
+            max_height = max(media.height - y, 1)
+            width = max(1, min(crop.width, max_width))
+            height = max(1, min(crop.height, max_height))
+            self._session.crop = CropRect(x=x, y=y, width=width, height=height)
+            self._initial_crop = None
 
     def save_as(self) -> None:
         if self._session is None:
             QMessageBox.information(self, "No Media", "Open a media file first.")
+            return
+        if not self._check_media_tools(["ffmpeg"]):
             return
 
         output_path, _ = QFileDialog.getSaveFileName(
@@ -516,8 +629,9 @@ class MainWindow(QMainWindow):
             trim_start=normalized.start,
             trim_end=normalized.end,
             crop=self._effective_crop_for_export(),
+            playback_rate=self._playback_rate,
+            has_audio=self._session.media.has_audio,
         )
-        self.statusBar().showMessage("Export started…")
         self._exporter.start(command, Path(output_path))
 
     def _effective_crop_for_export(self) -> Optional[CropRect]:
@@ -545,7 +659,6 @@ class MainWindow(QMainWindow):
             height=self._session.media.height,
         )
         self.crop_overlay.set_crop_rect(self._session.crop)
-        self.statusBar().showMessage("Crop reset to full frame", 2500)
 
     def create_crop(self) -> None:
         if self._session is None:
@@ -565,13 +678,16 @@ class MainWindow(QMainWindow):
         )
         self.crop_overlay.set_crop_rect(self._session.crop)
         self.crop_overlay.show()
-        self.statusBar().showMessage(
-            "Crop created. Drag yellow edges or box on video to adjust.",
-            3500,
-        )
 
     def _set_loop_playback(self, enabled: bool) -> None:
         self._loop_playback = enabled
+
+    def set_playback_rate(self, rate: float) -> None:
+        self._playback_rate = rate
+        self._apply_playback_rate()
+        action = self._playback_speed_actions.get(rate)
+        if action is not None and not action.isChecked():
+            action.setChecked(True)
 
     def _show_trim_value_dialog(self, title: str, current_ms: int) -> Optional[int]:
         dialog = TrimValueDialog(title, current_ms, self._fps, self)
@@ -674,7 +790,7 @@ class MainWindow(QMainWindow):
         else:
             self._media_player.setPosition(new_position)
 
-    def _handle_left_right(self, direction: int) -> None:
+    def _nudge_trim_handle(self, direction: int) -> None:
         if self._session is None:
             return
 
@@ -686,9 +802,6 @@ class MainWindow(QMainWindow):
         if self.timeline_widget.has_selected_trim_handle():
             if self.timeline_widget.nudge_selected(step_ms * direction):
                 self._timeline_trim_changed(*self.timeline_widget.trim_range())
-                return
-
-        self.step_frame(direction)
 
     def _seek_from_timeline(self, value: int) -> None:
         trim_in_ms, trim_out_ms = self.timeline_widget.trim_range()
@@ -741,6 +854,21 @@ class MainWindow(QMainWindow):
                 "trimming, cropping, and exporting clips.<br><br>"
                 'Repository: <a href="https://github.com/rsgalloway/cropbox">'
                 "github.com/rsgalloway/cropbox</a>"
+            ),
+        )
+
+    def show_ffmpeg_install_dialog(self) -> None:
+        QMessageBox.information(
+            self,
+            "Install FFmpeg",
+            (
+                "Cropbox requires ffmpeg and ffprobe for probing and export.\n\n"
+                "Ubuntu/Debian:\n"
+                "  sudo apt install ffmpeg\n\n"
+                "macOS with Homebrew:\n"
+                "  brew install ffmpeg\n\n"
+                "Windows:\n"
+                "  Install FFmpeg and make sure ffmpeg.exe and ffprobe.exe are on PATH."
             ),
         )
 
@@ -798,16 +926,7 @@ class MainWindow(QMainWindow):
         self.timeline_widget.set_position(position)
 
     def _refresh_trim_labels(self) -> None:
-        if self._session is None:
-            self.trim_in_label.setText("In: 00:00:00.000 (frame 0)")
-            self.trim_out_label.setText("Out: 00:00:00.000 (frame 0)")
-            return
-
-        trim = self._session.trim
-        in_frame = int(round((trim.start or 0.0) * (self._fps or 0.0))) if self._fps else 0
-        out_frame = int(round((trim.end or 0.0) * (self._fps or 0.0))) if self._fps else 0
-        self.trim_in_label.setText(f"In: {_format_time(trim.start)} (frame {in_frame})")
-        self.trim_out_label.setText(f"Out: {_format_time(trim.end)} (frame {out_frame})")
+        return
 
     def _on_position_changed(self, position: int) -> None:
         trim_in_ms, trim_out_ms = self.timeline_widget.trim_range()
@@ -845,9 +964,7 @@ class MainWindow(QMainWindow):
         self._set_play_icon(state == QMediaPlayer.PlayingState)
 
     def _on_export_finished(self, output_path: Path) -> None:
-        self.statusBar().showMessage(f"Export complete: {output_path.name}", 5000)
         QMessageBox.information(self, "Export Complete", f"Saved to:\n{output_path}")
 
     def _on_export_failed(self, message: str) -> None:
-        self.statusBar().showMessage("Export failed", 5000)
         QMessageBox.critical(self, "Export Failed", message)
