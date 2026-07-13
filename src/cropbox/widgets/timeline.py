@@ -11,15 +11,25 @@ class TimelineWidget(QWidget):
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.setMinimumHeight(26)
+        self.setMinimumHeight(44)
         self.setFocusPolicy(Qt.StrongFocus)
 
         self._duration_ms = 0
+        self._fps: Optional[float] = None
+        self._annotations_visible = True
         self._position_ms = 0
         self._trim_in_ms = 0
         self._trim_out_ms = 0
         self._drag_mode: Optional[str] = None
         self._selected_target: Optional[str] = None
+
+    def set_frame_rate(self, fps: Optional[float]) -> None:
+        self._fps = fps if fps and fps > 0 else None
+        self.update()
+
+    def set_annotations_visible(self, visible: bool) -> None:
+        self._annotations_visible = visible
+        self.update()
 
     def set_duration(self, duration_ms: int) -> None:
         duration = max(0, duration_ms)
@@ -30,14 +40,18 @@ class TimelineWidget(QWidget):
         self.update()
 
     def set_position(self, position_ms: int) -> None:
-        self._position_ms = max(0, min(position_ms, self._duration_ms))
+        self._position_ms = self._clamp_to_trim(position_ms)
         self.update()
+
+    def position(self) -> int:
+        return self._position_ms
 
     def set_trim_range(self, trim_in_ms: int, trim_out_ms: int) -> None:
         in_value = max(0, min(trim_in_ms, self._duration_ms))
         out_value = max(in_value, min(trim_out_ms, self._duration_ms))
         self._trim_in_ms = in_value
         self._trim_out_ms = out_value
+        self._position_ms = self._clamp_to_trim(self._position_ms)
         self.update()
 
     def trim_range(self) -> Tuple[int, int]:
@@ -58,6 +72,7 @@ class TimelineWidget(QWidget):
             if new_trim_in == self._trim_in_ms:
                 return True
             self._trim_in_ms = new_trim_in
+            self._position_ms = self._clamp_to_trim(self._position_ms)
             self.trimChanged.emit(self._trim_in_ms, self._trim_out_ms)
             self.update()
             return True
@@ -69,12 +84,13 @@ class TimelineWidget(QWidget):
             if new_trim_out == self._trim_out_ms:
                 return True
             self._trim_out_ms = new_trim_out
+            self._position_ms = self._clamp_to_trim(self._position_ms)
             self.trimChanged.emit(self._trim_in_ms, self._trim_out_ms)
             self.update()
             return True
 
         if self._selected_target == "playhead":
-            new_position = max(0, min(self._position_ms + delta_ms, self._duration_ms))
+            new_position = self._clamp_to_trim(self._position_ms + delta_ms)
             if new_position == self._position_ms:
                 return True
             self._position_ms = new_position
@@ -86,7 +102,22 @@ class TimelineWidget(QWidget):
 
     def _track_rect(self) -> QRectF:
         margin = 10.0
-        return QRectF(margin, 10.0, max(10.0, self.width() - (margin * 2.0)), 6.0)
+        return QRectF(margin, 28.0, max(10.0, self.width() - (margin * 2.0)), 6.0)
+
+    def _trim_label(self, value_ms: int) -> str:
+        total_ms = max(value_ms, 0)
+        hours = total_ms // 3_600_000
+        minutes = (total_ms % 3_600_000) // 60_000
+        seconds = (total_ms % 60_000) // 1000
+        millis = total_ms % 1000
+        time_text = f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
+        if self._fps is None:
+            return time_text
+        frame = max(0, int(round((value_ms / 1000.0) * self._fps)))
+        return f"{time_text}  x{frame}"
+
+    def _clamp_to_trim(self, value_ms: int) -> int:
+        return max(self._trim_in_ms, min(value_ms, self._trim_out_ms))
 
     def _x_from_ms(self, value_ms: int) -> float:
         track = self._track_rect()
@@ -123,6 +154,23 @@ class TimelineWidget(QWidget):
 
         in_x = self._x_from_ms(self._trim_in_ms)
         out_x = self._x_from_ms(self._trim_out_ms)
+
+        if self._annotations_visible:
+            painter.setPen(QColor("#dbe2e8"))
+            label_font = painter.font()
+            label_font.setPixelSize(11)
+            painter.setFont(label_font)
+            painter.drawText(
+                QRectF(10.0, 1.0, max(0.0, self.width() - 20.0), 20.0),
+                Qt.AlignLeft | Qt.AlignVCenter,
+                self._trim_label(self._trim_in_ms),
+            )
+            painter.drawText(
+                QRectF(10.0, 1.0, max(0.0, self.width() - 20.0), 20.0),
+                Qt.AlignRight | Qt.AlignVCenter,
+                self._trim_label(self._trim_out_ms),
+            )
+
         keep_rect = QRectF(in_x, track.top(), max(2.0, out_x - in_x), track.height())
         painter.setBrush(keep_color)
         painter.drawRoundedRect(keep_rect, 3.0, 3.0)
@@ -177,7 +225,7 @@ class TimelineWidget(QWidget):
 
         self._drag_mode = "playhead"
         self._selected_target = "playhead"
-        self._position_ms = self._ms_from_x(point.x())
+        self._position_ms = self._clamp_to_trim(self._ms_from_x(point.x()))
         self.seekRequested.emit(self._position_ms)
         self.setFocus(Qt.MouseFocusReason)
         self.update()
@@ -190,18 +238,20 @@ class TimelineWidget(QWidget):
 
         if self._drag_mode == "trim_in":
             self._trim_in_ms = min(value, self._trim_out_ms)
+            self._position_ms = self._clamp_to_trim(self._position_ms)
             self.trimChanged.emit(self._trim_in_ms, self._trim_out_ms)
             self.update()
             return
 
         if self._drag_mode == "trim_out":
             self._trim_out_ms = max(value, self._trim_in_ms)
+            self._position_ms = self._clamp_to_trim(self._position_ms)
             self.trimChanged.emit(self._trim_in_ms, self._trim_out_ms)
             self.update()
             return
 
         if self._drag_mode == "playhead":
-            self._position_ms = value
+            self._position_ms = self._clamp_to_trim(value)
             self.seekRequested.emit(self._position_ms)
             self.update()
 

@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import QEvent, Qt, QUrl
+from PySide6.QtCore import QEvent, QSize, Qt, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QImage, QKeySequence, QMovie, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame, QVideoSink
 from PySide6.QtWidgets import (
@@ -30,6 +30,7 @@ from cropbox.models.crop_rect import CropRect
 from cropbox.models.edit_session import EditSession
 from cropbox.models.trim_range import TrimRange
 from cropbox.widgets.crop_overlay import CropOverlay
+from cropbox.widgets.info_panel import InfoPanel
 from cropbox.widgets.player_widget import PlayerWidget
 from cropbox.widgets.timeline import TimelineWidget
 
@@ -222,6 +223,10 @@ class MainWindow(QMainWindow):
         self.crop_overlay.raise_()
         self.crop_overlay.hide()
 
+        self.info_panel = InfoPanel(self)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.info_panel)
+        self.info_panel.hide()
+
         self.timeline_widget = TimelineWidget(self)
 
         self.play_button = QToolButton(self)
@@ -229,6 +234,13 @@ class MainWindow(QMainWindow):
         self.play_button.setToolTip("Play/Pause (Space)")
 
         self.mute_button = QToolButton(self)
+        assets_path = Path(__file__).resolve().parents[1] / "assets"
+        self._muted_icon = QIcon(str(assets_path / "mute.svg"))
+        self._audio_icon = QIcon(str(assets_path / "audio.svg"))
+        self.mute_button.setIcon(self._muted_icon)
+        self.mute_button.setIconSize(QSize(19, 19))
+        self.mute_button.setFixedSize(QSize(30, 30))
+        self.mute_button.setCheckable(True)
         self.mute_button.setToolTip("Toggle mute")
         self.mute_button.setAutoRaise(False)
 
@@ -258,6 +270,7 @@ class MainWindow(QMainWindow):
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("File")
         edit_menu = self.menuBar().addMenu("Edit")
+        view_menu = self.menuBar().addMenu("View")
         help_menu = self.menuBar().addMenu("Help")
         playback_speed_menu = QMenu("Playback Speed", self)
 
@@ -292,6 +305,14 @@ class MainWindow(QMainWindow):
         self.loop_playback_action.setCheckable(True)
         self.loop_playback_action.setChecked(True)
         self.loop_playback_action.toggled.connect(self._set_loop_playback)
+
+        self.show_metadata_action = self.info_panel.toggleViewAction()
+        self.show_metadata_action.setText("Info Panel")
+
+        self.show_annotations_action = QAction("Show Annotations", self)
+        self.show_annotations_action.setCheckable(True)
+        self.show_annotations_action.setChecked(True)
+        self.show_annotations_action.toggled.connect(self._set_annotations_visible)
 
         self.playback_speed_group = QActionGroup(self)
         self.playback_speed_group.setExclusive(True)
@@ -328,6 +349,9 @@ class MainWindow(QMainWindow):
         edit_menu.addSeparator()
         edit_menu.addAction(self.loop_playback_action)
 
+        view_menu.addAction(self.show_metadata_action)
+        view_menu.addAction(self.show_annotations_action)
+
         help_menu.addAction(install_ffmpeg_action)
         help_menu.addSeparator()
         help_menu.addAction(about_action)
@@ -354,6 +378,7 @@ class MainWindow(QMainWindow):
         self.crop_overlay.cropChanged.connect(self._overlay_crop_changed)
         self.video_container.customContextMenuRequested.connect(self._show_video_context_menu)
         self._video_sink.videoFrameChanged.connect(self._on_video_frame_changed)
+        self.info_panel.valueSubmitted.connect(self._apply_info_value)
 
         self._media_player.positionChanged.connect(self._on_position_changed)
         self._media_player.durationChanged.connect(self._on_duration_changed)
@@ -372,7 +397,9 @@ class MainWindow(QMainWindow):
         self.create_crop_action.setEnabled(enabled)
         self.reset_crop_action.setEnabled(enabled)
         self.loop_playback_action.setEnabled(enabled)
-        self.mute_button.setEnabled(enabled)
+        self.mute_button.setEnabled(
+            enabled and bool(self._session and self._session.media.has_audio)
+        )
 
     def _warn_missing_media_tools(self) -> None:
         if not self._missing_tools:
@@ -432,8 +459,8 @@ class MainWindow(QMainWindow):
 
     def _update_mute_button(self) -> None:
         is_muted = self._audio_output.isMuted()
-        self.mute_button.setIcon(QIcon())
-        self.mute_button.setText("Muted" if is_muted else "Audio")
+        self.mute_button.setIcon(self._muted_icon if is_muted else self._audio_icon)
+        self.mute_button.setChecked(is_muted)
         self.mute_button.setToolTip("Unmute" if is_muted else "Mute")
 
     def _apply_playback_rate(self) -> None:
@@ -524,6 +551,7 @@ class MainWindow(QMainWindow):
         trim_in_ms = max(int(initial_trim.start * 1000), 0)
         trim_out_ms = max(int(initial_trim.end * 1000), 0)
         self.timeline_widget.set_duration(self._duration_ms)
+        self.timeline_widget.set_frame_rate(self._fps)
         self.timeline_widget.set_trim_range(trim_in_ms, trim_out_ms)
         self.timeline_widget.set_position(trim_in_ms)
 
@@ -632,6 +660,7 @@ class MainWindow(QMainWindow):
             height=self._session.media.height,
         )
         self.crop_overlay.set_crop_rect(self._session.crop)
+        self._refresh_metadata()
 
     def create_crop(self) -> None:
         if self._session is None:
@@ -651,6 +680,7 @@ class MainWindow(QMainWindow):
         )
         self.crop_overlay.set_crop_rect(self._session.crop)
         self.crop_overlay.show()
+        self._refresh_metadata()
 
     def _set_loop_playback(self, enabled: bool) -> None:
         self._loop_playback = enabled
@@ -658,9 +688,15 @@ class MainWindow(QMainWindow):
     def set_playback_rate(self, rate: float) -> None:
         self._playback_rate = rate
         self._apply_playback_rate()
+        self._refresh_metadata()
         action = self._playback_speed_actions.get(rate)
         if action is not None and not action.isChecked():
             action.setChecked(True)
+        elif action is None:
+            self.playback_speed_group.setExclusive(False)
+            for speed_action in self.playback_speed_group.actions():
+                speed_action.setChecked(False)
+            self.playback_speed_group.setExclusive(True)
 
     def _show_trim_value_dialog(self, title: str, current_ms: int) -> Optional[int]:
         dialog = TrimValueDialog(title, current_ms, self._fps, self)
@@ -717,10 +753,11 @@ class MainWindow(QMainWindow):
         trim_in_ms, trim_out_ms = self.timeline_widget.trim_range()
         current = self._current_position_ms()
         if current < trim_in_ms or current > trim_out_ms:
+            clamped = max(trim_in_ms, min(current, trim_out_ms))
             if self._is_gif_mode():
-                self._seek_gif(trim_in_ms)
+                self._seek_gif(clamped)
             else:
-                self._media_player.setPosition(trim_in_ms)
+                self._media_player.setPosition(clamped)
 
         if self._is_gif_mode():
             if self._gif_movie is None:
@@ -793,16 +830,18 @@ class MainWindow(QMainWindow):
         )
         current = self._current_position_ms()
         if current < trim_in_ms or current > trim_out_ms:
+            clamped = max(trim_in_ms, min(current, trim_out_ms))
             if self._is_gif_mode():
-                self._seek_gif(trim_in_ms)
+                self._seek_gif(clamped)
             else:
-                self._media_player.setPosition(trim_in_ms)
+                self._media_player.setPosition(clamped)
         self._refresh_trim_labels()
 
     def _overlay_crop_changed(self, x: int, y: int, width: int, height: int) -> None:
         if self._session is None:
             return
         self._session.crop = CropRect(x=x, y=y, width=width, height=height)
+        self._refresh_metadata()
 
     def _show_video_context_menu(self, pos) -> None:
         menu = QMenu(self)
@@ -812,6 +851,9 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction(self.create_crop_action)
         menu.addAction(self.reset_crop_action)
+        menu.addSeparator()
+        menu.addAction(self.show_metadata_action)
+        menu.addAction(self.show_annotations_action)
         menu.addSeparator()
         menu.addAction(self.loop_playback_action)
         menu.exec(self.video_container.mapToGlobal(pos))
@@ -850,6 +892,131 @@ class MainWindow(QMainWindow):
         self.video_widget.setGeometry(frame_rect)
         self.crop_overlay.setGeometry(frame_rect)
         self.crop_overlay.raise_()
+
+    def _set_annotations_visible(self, visible: bool) -> None:
+        self.crop_overlay.set_annotations_visible(visible)
+        self.timeline_widget.set_annotations_visible(visible)
+
+    def _apply_info_value(self, key: str, value: str) -> None:
+        if self._session is None:
+            return
+
+        valid = False
+        try:
+            if key == "current_time":
+                position_ms = _parse_time_to_ms(value)
+                valid = position_ms is not None and self._seek_to_position(position_ms)
+            elif key == "current_frame":
+                frame = int(value)
+                valid = frame >= 0 and self._seek_to_position(self._frame_to_position_ms(frame))
+            elif key == "playback_fps":
+                playback_fps = float(value)
+                if playback_fps > 0 and self._fps and self._fps > 0:
+                    self.set_playback_rate(playback_fps / self._fps)
+                    valid = True
+            elif key in {"trim_in_time", "trim_out_time"}:
+                position_ms = _parse_time_to_ms(value)
+                valid = position_ms is not None and self._apply_info_trim(
+                    key.startswith("trim_in"), position_ms
+                )
+            elif key in {"trim_in_frame", "trim_out_frame"}:
+                frame = int(value)
+                valid = frame >= 0 and self._apply_info_trim(
+                    key.startswith("trim_in"), self._frame_to_position_ms(frame)
+                )
+            elif key.startswith("crop_"):
+                valid = self._apply_info_crop()
+        except ValueError:
+            valid = False
+
+        self.info_panel.set_invalid(key, not valid)
+        if valid:
+            self._refresh_metadata(force=True)
+
+    def _seek_to_position(self, position_ms: int) -> bool:
+        trim_in_ms, trim_out_ms = self.timeline_widget.trim_range()
+        if position_ms < trim_in_ms or position_ms > trim_out_ms:
+            return False
+        self.timeline_widget.set_position(position_ms)
+        self.position_label.setText(_format_time(position_ms / 1000.0))
+        if self._is_gif_mode():
+            self._seek_gif(position_ms)
+        else:
+            self._media_player.setPosition(position_ms)
+        return True
+
+    def _apply_info_trim(self, is_trim_in: bool, position_ms: int) -> bool:
+        trim_in_ms, trim_out_ms = self.timeline_widget.trim_range()
+        if is_trim_in:
+            if position_ms < 0 or position_ms > trim_out_ms:
+                return False
+            trim_in_ms = position_ms
+        else:
+            if position_ms < trim_in_ms or position_ms > self._duration_ms:
+                return False
+            trim_out_ms = position_ms
+        self.timeline_widget.set_trim_range(trim_in_ms, trim_out_ms)
+        self._timeline_trim_changed(trim_in_ms, trim_out_ms)
+        return True
+
+    def _apply_info_crop(self) -> bool:
+        if self._session is None:
+            return False
+        try:
+            values = {key: int(value) for key, value in self.info_panel.crop_values().items()}
+        except ValueError:
+            return False
+
+        x = values["crop_x"]
+        y = values["crop_y"]
+        width = values["crop_width"]
+        height = values["crop_height"]
+        media = self._session.media
+        if (
+            x < 0
+            or y < 0
+            or width <= 0
+            or height <= 0
+            or x + width > media.width
+            or y + height > media.height
+        ):
+            return False
+
+        crop = CropRect(x=x, y=y, width=width, height=height)
+        self._session.crop = crop
+        self.crop_overlay.set_crop_rect(crop)
+        self.crop_overlay.show()
+        return True
+
+    def _refresh_metadata(self, force: bool = False) -> None:
+        if self._session is None:
+            self.info_panel.set_fields_enabled(False)
+            self.info_panel.source_size_label.setText("Source: -")
+            return
+
+        trim_in_ms, trim_out_ms = self.timeline_widget.trim_range()
+        crop = self._session.crop
+        current_ms = self.timeline_widget.position()
+        values = {
+            "current_time": _format_time(current_ms / 1000.0),
+            "current_frame": str(self._position_to_frame(current_ms)),
+            "playback_fps": (
+                f"{self._fps * self._playback_rate:.3f}" if self._fps and self._fps > 0 else ""
+            ),
+            "trim_in_time": _format_time(trim_in_ms / 1000.0),
+            "trim_in_frame": str(self._position_to_frame(trim_in_ms)),
+            "trim_out_time": _format_time(trim_out_ms / 1000.0),
+            "trim_out_frame": str(self._position_to_frame(trim_out_ms)),
+            "crop_x": str(crop.x) if crop else "",
+            "crop_y": str(crop.y) if crop else "",
+            "crop_width": str(crop.width) if crop else "",
+            "crop_height": str(crop.height) if crop else "",
+        }
+        self.info_panel.set_fields_enabled(True)
+        self.info_panel.source_size_label.setText(
+            f"Source: {self._session.media.width} x {self._session.media.height}"
+        )
+        self.info_panel.set_values(values, force=force)
 
     def eventFilter(self, watched, event) -> bool:
         if watched in {self.video_container, self.video_frame} and event.type() in {
@@ -897,9 +1064,10 @@ class MainWindow(QMainWindow):
         self._gif_position_ms = position
         self.position_label.setText(_format_time(position / 1000.0))
         self.timeline_widget.set_position(position)
+        self._refresh_metadata()
 
     def _refresh_trim_labels(self) -> None:
-        return
+        self._refresh_metadata()
 
     def _on_position_changed(self, position: int) -> None:
         trim_in_ms, trim_out_ms = self.timeline_widget.trim_range()
@@ -920,6 +1088,7 @@ class MainWindow(QMainWindow):
 
         self.position_label.setText(_format_time(position / 1000.0))
         self.timeline_widget.set_position(position)
+        self._refresh_metadata()
 
     def _on_duration_changed(self, duration: int) -> None:
         if duration <= 0:

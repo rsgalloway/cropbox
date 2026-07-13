@@ -18,6 +18,7 @@ class CropOverlay(QWidget):
         self._source_width = 0
         self._source_height = 0
         self._crop: Optional[CropRect] = None
+        self._annotations_visible = True
         self._drag_mode: Optional[str] = None
         self._last_point = QPointF(0.0, 0.0)
         self._line_width = 2.0
@@ -38,6 +39,10 @@ class CropOverlay(QWidget):
 
     def crop_rect(self) -> Optional[CropRect]:
         return self._crop
+
+    def set_annotations_visible(self, visible: bool) -> None:
+        self._annotations_visible = visible
+        self.update()
 
     def _display_rect(self) -> QRectF:
         if self._source_width <= 0 or self._source_height <= 0:
@@ -152,6 +157,52 @@ class CropOverlay(QWidget):
                     self._handle_size,
                 )
             )
+
+        if self._annotations_visible:
+            self._draw_corner_labels(painter, draw_rect)
+
+    def _draw_corner_labels(self, painter: QPainter, rect: QRectF) -> None:
+        if self._crop is None:
+            return
+
+        right = self._crop.x + self._crop.width
+        bottom = self._crop.y + self._crop.height
+        labels = (
+            (f"({self._crop.x}, {self._crop.y})", rect.topLeft(), False, False),
+            (f"({right}, {self._crop.y})", rect.topRight(), True, False),
+            (f"({self._crop.x}, {bottom})", rect.bottomLeft(), False, True),
+            (f"({right}, {bottom})", rect.bottomRight(), True, True),
+        )
+
+        font = painter.font()
+        font.setPixelSize(11)
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        margin = 7.0
+        padding = 4.0
+
+        for text, anchor, align_right, align_bottom in labels:
+            text_width = float(metrics.horizontalAdvance(text))
+            text_height = float(metrics.height())
+            x = (
+                anchor.x() - text_width - (padding * 2.0) - margin
+                if align_right
+                else anchor.x() + margin
+            )
+            y = (
+                anchor.y() - text_height - (padding * 2.0) - margin
+                if align_bottom
+                else anchor.y() + margin
+            )
+            label_rect = QRectF(
+                x,
+                y,
+                text_width + (padding * 2.0),
+                text_height + (padding * 2.0),
+            )
+            painter.fillRect(label_rect, QColor(5, 6, 8, 210))
+            painter.setPen(QColor("#edf2f7"))
+            painter.drawText(label_rect, Qt.AlignCenter, text)
 
     def _handle_points(self, rect: QRectF) -> List[QPointF]:
         return [
