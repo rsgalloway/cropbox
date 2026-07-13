@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
 
 [project]
 name = "cropbox"
-version = "0.1.0"
+version = "0.1.1"
 description = "Lightweight media crop and trim tool."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -12,5 +12,27 @@ dependencies = [
     "PySide6>=6.5",
 ]
 
+[project.urls]
+Repository = "https://github.com/rsgalloway/cropbox"
+
 [project.scripts]
 cropbox = "cropbox.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cropbox"]
+exclude = [
+    "/src/cropbox/**/__pycache__",
+    "/src/cropbox/**/*.pyc",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py38"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.8"
+warn_unused_configs = true
+ignore_missing_imports = true

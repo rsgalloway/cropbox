@@ -11,3 +11,8 @@ tmp/
 venv*/
 .vscode/
 *.egg-info/
+.agents/
+.codex/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
