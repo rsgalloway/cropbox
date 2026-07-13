@@ -45,6 +45,14 @@ sudo apt install ffmpeg
 
 ## Install
 
+Install the latest release from PyPI:
+
+```bash
+pip install cropbox
+```
+
+Or install from a local source checkout:
+
 ```bash
 pip install .
 ```

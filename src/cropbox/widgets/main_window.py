@@ -199,6 +199,7 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         central = QWidget(self)
+        central.setObjectName("mainContent")
         self.setCentralWidget(central)
 
         self.video_container = QWidget(self)
@@ -244,41 +245,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.video_container, stretch=1)
         layout.addLayout(transport_row)
 
-        central.setStyleSheet(
+        self.video_frame.setStyleSheet(
             """
-            QWidget {
-                background-color: #14171c;
-                color: #d6d9e0;
-                font-size: 13px;
-            }
             QWidget#videoFrame {
                 background-color: #050608;
                 border-radius: 10px;
-            }
-            QMainWindow {
-                background-color: #14171c;
-            }
-            QToolButton, QPushButton {
-                background-color: #252a32;
-                border: 1px solid #3d4450;
-                border-radius: 6px;
-                padding: 6px 10px;
-                color: #d6d9e0;
-            }
-            QToolButton:hover, QPushButton:hover {
-                background-color: #2f3640;
-            }
-            QSlider::groove:horizontal {
-                border: 0;
-                height: 4px;
-                background: #2a2f38;
-                border-radius: 2px;
-            }
-            QSlider::handle:horizontal {
-                background: #7f8fa3;
-                width: 12px;
-                margin: -5px 0;
-                border-radius: 6px;
             }
             """
         )
@@ -288,7 +259,7 @@ class MainWindow(QMainWindow):
         file_menu = self.menuBar().addMenu("File")
         edit_menu = self.menuBar().addMenu("Edit")
         help_menu = self.menuBar().addMenu("Help")
-        playback_speed_menu = edit_menu.addMenu("Playback Speed")
+        playback_speed_menu = QMenu("Playback Speed", self)
 
         open_action = QAction("Open", self)
         open_action.setShortcut(QKeySequence.Open)
@@ -352,6 +323,8 @@ class MainWindow(QMainWindow):
         edit_menu.addSeparator()
         edit_menu.addAction(self.create_crop_action)
         edit_menu.addAction(self.reset_crop_action)
+        edit_menu.addSeparator()
+        edit_menu.addMenu(playback_speed_menu)
         edit_menu.addSeparator()
         edit_menu.addAction(self.loop_playback_action)
 
