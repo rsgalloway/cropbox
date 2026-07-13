@@ -63,9 +63,7 @@ def test_export_media_refuses_existing_output_without_force(tmp_path: Path) -> N
         export_media(input_path, output_path, 0.0, None, None)
 
 
-def test_export_media_rejects_crop_outside_source(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_export_media_rejects_crop_outside_source(tmp_path: Path, monkeypatch) -> None:
     input_path = tmp_path / "input.mp4"
     input_path.touch()
     monkeypatch.setattr("cropbox.media.headless.missing_media_tools", lambda: [])
@@ -81,9 +79,7 @@ def test_export_media_rejects_crop_outside_source(
         )
 
 
-def test_export_media_returns_ffmpeg_failure_status(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_export_media_returns_ffmpeg_failure_status(tmp_path: Path, monkeypatch) -> None:
     input_path = tmp_path / "input.mp4"
     input_path.touch()
     monkeypatch.setattr("cropbox.media.headless.missing_media_tools", lambda: [])

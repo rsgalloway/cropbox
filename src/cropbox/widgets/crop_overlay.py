@@ -1,3 +1,4 @@
+import math
 from typing import List, Optional, Tuple
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
@@ -20,6 +21,7 @@ class CropOverlay(QWidget):
         self._crop: Optional[CropRect] = None
         self._annotations_visible = True
         self._drag_mode: Optional[str] = None
+        self._drag_aspect_ratio: Optional[float] = None
         self._last_point = QPointF(0.0, 0.0)
         self._line_width = 2.0
         self._handle_size = 8.0
@@ -354,7 +356,105 @@ class CropOverlay(QWidget):
 
         crop_display = self._crop_to_display_rect()
         self._drag_mode = self._edge_hit(event.position(), crop_display)
+        self._drag_aspect_ratio = (
+            float(self._crop.width) / float(self._crop.height)
+            if self._drag_mode not in {None, "move"} and self._crop.height > 0
+            else None
+        )
         self._last_point = event.position()
+
+    def _resize_with_aspect_ratio(
+        self,
+        crop: CropRect,
+        mode: str,
+        delta_x: int,
+        delta_y: int,
+        aspect_ratio: float,
+    ) -> CropRect:
+        min_size = 2
+        left = crop.x
+        top = crop.y
+        right = crop.x + crop.width
+        bottom = crop.y + crop.height
+
+        moves_left = "left" in mode
+        moves_right = "right" in mode
+        moves_top = "top" in mode
+        moves_bottom = "bottom" in mode
+        is_corner = (moves_left or moves_right) and (moves_top or moves_bottom)
+
+        raw_width = crop.width
+        raw_height = crop.height
+        if moves_left:
+            raw_width -= delta_x
+        elif moves_right:
+            raw_width += delta_x
+        if moves_top:
+            raw_height -= delta_y
+        elif moves_bottom:
+            raw_height += delta_y
+
+        if is_corner:
+            width_change = abs(raw_width - crop.width) / float(max(1, crop.width))
+            height_change = abs(raw_height - crop.height) / float(max(1, crop.height))
+            if width_change >= height_change:
+                width = raw_width
+                height = width / aspect_ratio
+            else:
+                height = raw_height
+                width = height * aspect_ratio
+
+            max_width = float(right if moves_left else self._source_width - left)
+            max_height = float(bottom if moves_top else self._source_height - top)
+            width = min(width, max_width, max_height * aspect_ratio)
+        elif moves_left or moves_right:
+            width = raw_width
+            center_y = top + (crop.height / 2.0)
+            max_height = 2.0 * min(center_y, self._source_height - center_y)
+            max_width = float(right if moves_left else self._source_width - left)
+            width = min(width, max_width, max_height * aspect_ratio)
+            height = width / aspect_ratio
+        else:
+            height = raw_height
+            center_x = left + (crop.width / 2.0)
+            max_width = 2.0 * min(center_x, self._source_width - center_x)
+            max_height = float(bottom if moves_top else self._source_height - top)
+            height = min(height, max_height, max_width / aspect_ratio)
+            width = height * aspect_ratio
+
+        min_width = max(float(min_size), math.ceil(min_size * aspect_ratio))
+        width = max(min_width, width)
+        height = width / aspect_ratio
+        width_px = max(min_size, int(round(width)))
+        height_px = max(min_size, int(round(height)))
+
+        if moves_left:
+            x = right - width_px
+        else:
+            x = left
+        if moves_right:
+            x = left
+
+        if moves_top:
+            y = bottom - height_px
+        elif moves_bottom:
+            y = top
+        else:
+            center_y = top + (crop.height / 2.0)
+            y = int(round(center_y - (height_px / 2.0)))
+
+        if moves_top or moves_bottom:
+            if not is_corner:
+                center_x = left + (crop.width / 2.0)
+                x = int(round(center_x - (width_px / 2.0)))
+            elif moves_left:
+                x = right - width_px
+            else:
+                x = left
+
+        x = max(0, min(x, self._source_width - width_px))
+        y = max(0, min(y, self._source_height - height_px))
+        return CropRect(x=x, y=y, width=width_px, height=height_px)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if self._crop is None:
@@ -365,6 +465,25 @@ class CropOverlay(QWidget):
 
         delta = event.position() - self._last_point
         delta_x, delta_y = self._pixel_delta_to_source_delta(delta.x(), delta.y())
+
+        preserve_aspect = bool(event.modifiers() & Qt.ControlModifier)
+        if preserve_aspect and self._drag_aspect_ratio is not None:
+            self._crop = self._resize_with_aspect_ratio(
+                self._crop,
+                self._drag_mode,
+                delta_x,
+                delta_y,
+                self._drag_aspect_ratio,
+            )
+            self._last_point = event.position()
+            self.cropChanged.emit(
+                self._crop.x,
+                self._crop.y,
+                self._crop.width,
+                self._crop.height,
+            )
+            self.update()
+            return
 
         min_size = 2
         max_x = self._source_width
@@ -398,4 +517,5 @@ class CropOverlay(QWidget):
 
     def mouseReleaseEvent(self, _event: QMouseEvent) -> None:
         self._drag_mode = None
+        self._drag_aspect_ratio = None
         self.setCursor(Qt.ArrowCursor)

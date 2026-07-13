@@ -8,6 +8,7 @@ A lightweight desktop utility for trimming, cropping, previewing, and exporting 
 
 - MP4, MOV, MKV, WebM, and GIF preview
 - Interactive crop overlay with draggable edges and handles
+- Ctrl-drag crop handles to preserve the crop aspect ratio
 - Toggleable crop-coordinate and trim time/frame annotations
 - Timeline trim in/out selection
 - Exact timeline viewport start/end for precision trimming
