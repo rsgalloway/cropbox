@@ -67,8 +67,7 @@ def test_build_export_command_gif_with_crop_uses_filter_complex_crop() -> None:
 
     assert "-filter_complex" in command
     assert (
-        "[0:v]crop=200:100:10:20,split[v0][v1];[v0]palettegen[p];[v1][p]paletteuse[vout]"
-        in command
+        "[0:v]crop=200:100:10:20,split[v0][v1];[v0]palettegen[p];[v1][p]paletteuse[vout]" in command
     )
 
 
@@ -83,4 +82,6 @@ def test_build_export_command_gif_with_playback_rate_uses_setpts() -> None:
     )
 
     assert "-filter_complex" in command
-    assert "[0:v]setpts=PTS/0.500,split[v0][v1];[v0]palettegen[p];[v1][p]paletteuse[vout]" in command
+    assert (
+        "[0:v]setpts=PTS/0.500,split[v0][v1];[v0]palettegen[p];[v1][p]paletteuse[vout]" in command
+    )

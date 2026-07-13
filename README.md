@@ -10,6 +10,8 @@ A lightweight desktop utility for trimming, cropping, previewing, and exporting 
 - Interactive crop overlay with draggable edges and handles
 - Toggleable crop-coordinate and trim time/frame annotations
 - Timeline trim in/out selection
+- Exact timeline viewport start/end for precision trimming
+- Draggable gray viewport handles alongside the yellow trim handles
 - Exact trim-in and trim-out entry by timecode or frame number
 - Dockable Info panel for editing playback, trim, and crop values
 - Frame stepping and trim-handle nudging from the keyboard
@@ -36,13 +38,15 @@ sudo apt install ffmpeg
 ## Controls
 
 - Space: play/pause
+- Ctrl+I: toggle the Info panel
 - Left/Right: step one frame
 - Shift+Left/Right: nudge selected trim handle by one frame
+- Ctrl+Left/Right: nudge selected timeline viewport handle by one frame
 
 ## Menus
 
 - File: Open, Export, Quit
-- Edit: Set Trim In, Set Trim Out, Reset Trim, Create Crop, Reset Crop, Playback Speed, Loop Playback
+- Edit: Set Trim In, Set Trim Out, Reset Trim, Reset Timeline, Create Crop, Reset Crop, Playback Speed, Loop Playback
 - View: Info Panel, Show Annotations
 - Help: Install FFmpeg, About Cropbox
 
@@ -88,5 +92,8 @@ cropbox input.mp4 --trim-in 12.5 --trim-out 00:00:20.000 --crop 100 50 1280 720
 
 - Playback speed affects both preview and export.
 - Exact trim-in and trim-out values can also be entered from the Edit menu.
-- Press Enter in an Info panel field to apply current time/frame, playback FPS, trim, or crop changes.
+- Press Enter in an Info panel field to apply current time/frame, playback FPS, trim, timeline viewport, or crop changes.
+- Timeline Start and End zoom the visible timeline, but cannot exclude the trim range; expanding trim automatically expands the timeline viewport.
+- Gray viewport-handle drags preview against the current timeline and apply on mouse release.
+- Reset Timeline restores the full media duration.
 - The playhead is constrained to the active trim range.

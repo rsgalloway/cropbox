@@ -48,6 +48,17 @@ class InfoPanel(QDockWidget):
         )
         layout.addWidget(
             self._create_group(
+                "Timeline View",
+                (
+                    ("Start Time", "timeline_start_time"),
+                    ("Start Frame", "timeline_start_frame"),
+                    ("End Time", "timeline_end_time"),
+                    ("End Frame", "timeline_end_frame"),
+                ),
+            )
+        )
+        layout.addWidget(
+            self._create_group(
                 "Crop",
                 (
                     ("X", "crop_x"),

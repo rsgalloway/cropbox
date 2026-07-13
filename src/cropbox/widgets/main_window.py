@@ -295,6 +295,9 @@ class MainWindow(QMainWindow):
         self.reset_trim_action = QAction("Reset Trim", self)
         self.reset_trim_action.triggered.connect(self.reset_trim)
 
+        self.reset_timeline_action = QAction("Reset Timeline", self)
+        self.reset_timeline_action.triggered.connect(self.reset_timeline)
+
         self.create_crop_action = QAction("Create Crop", self)
         self.create_crop_action.triggered.connect(self.create_crop)
 
@@ -308,6 +311,7 @@ class MainWindow(QMainWindow):
 
         self.show_metadata_action = self.info_panel.toggleViewAction()
         self.show_metadata_action.setText("Info Panel")
+        self.show_metadata_action.setShortcut(QKeySequence("Ctrl+I"))
 
         self.show_annotations_action = QAction("Show Annotations", self)
         self.show_annotations_action.setCheckable(True)
@@ -341,6 +345,7 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self.set_trim_in_action)
         edit_menu.addAction(self.set_trim_out_action)
         edit_menu.addAction(self.reset_trim_action)
+        edit_menu.addAction(self.reset_timeline_action)
         edit_menu.addSeparator()
         edit_menu.addAction(self.create_crop_action)
         edit_menu.addAction(self.reset_crop_action)
@@ -369,12 +374,23 @@ class MainWindow(QMainWindow):
             self,
             activated=lambda: self._nudge_trim_handle(1),
         )
+        QShortcut(
+            QKeySequence(Qt.CTRL | Qt.Key_Left),
+            self,
+            activated=lambda: self._nudge_timeline_handle(-1),
+        )
+        QShortcut(
+            QKeySequence(Qt.CTRL | Qt.Key_Right),
+            self,
+            activated=lambda: self._nudge_timeline_handle(1),
+        )
 
     def _wire_signals(self) -> None:
         self.play_button.clicked.connect(self.toggle_play_pause)
         self.mute_button.clicked.connect(self.toggle_mute)
         self.timeline_widget.seekRequested.connect(self._seek_from_timeline)
         self.timeline_widget.trimChanged.connect(self._timeline_trim_changed)
+        self.timeline_widget.viewChanged.connect(lambda _start, _end: self._refresh_metadata())
         self.crop_overlay.cropChanged.connect(self._overlay_crop_changed)
         self.video_container.customContextMenuRequested.connect(self._show_video_context_menu)
         self._video_sink.videoFrameChanged.connect(self._on_video_frame_changed)
@@ -394,6 +410,7 @@ class MainWindow(QMainWindow):
         self.set_trim_in_action.setEnabled(enabled)
         self.set_trim_out_action.setEnabled(enabled)
         self.reset_trim_action.setEnabled(enabled)
+        self.reset_timeline_action.setEnabled(enabled)
         self.create_crop_action.setEnabled(enabled)
         self.reset_crop_action.setEnabled(enabled)
         self.loop_playback_action.setEnabled(enabled)
@@ -550,6 +567,7 @@ class MainWindow(QMainWindow):
         initial_trim = self._session.trim.normalized()
         trim_in_ms = max(int(initial_trim.start * 1000), 0)
         trim_out_ms = max(int(initial_trim.end * 1000), 0)
+        self.timeline_widget.reset_view_range()
         self.timeline_widget.set_duration(self._duration_ms)
         self.timeline_widget.set_frame_rate(self._fps)
         self.timeline_widget.set_trim_range(trim_in_ms, trim_out_ms)
@@ -746,6 +764,12 @@ class MainWindow(QMainWindow):
         self.timeline_widget.set_trim_range(0, self._duration_ms)
         self._timeline_trim_changed(0, self._duration_ms)
 
+    def reset_timeline(self) -> None:
+        if self._session is None:
+            return
+        self.timeline_widget.reset_view_range()
+        self._refresh_metadata()
+
     def toggle_play_pause(self) -> None:
         if self._session is None:
             return
@@ -813,6 +837,15 @@ class MainWindow(QMainWindow):
             if self.timeline_widget.nudge_selected(step_ms * direction):
                 self._timeline_trim_changed(*self.timeline_widget.trim_range())
 
+    def _nudge_timeline_handle(self, direction: int) -> None:
+        if self._session is None:
+            return
+        if self._fps and self._fps > 0:
+            step_ms = max(int(round(1000.0 / self._fps)), 1)
+        else:
+            step_ms = 33
+        self.timeline_widget.nudge_selected_view_handle(step_ms * direction)
+
     def _seek_from_timeline(self, value: int) -> None:
         trim_in_ms, trim_out_ms = self.timeline_widget.trim_range()
         clamped = max(trim_in_ms, min(value, trim_out_ms))
@@ -848,6 +881,7 @@ class MainWindow(QMainWindow):
         menu.addAction(self.set_trim_in_action)
         menu.addAction(self.set_trim_out_action)
         menu.addAction(self.reset_trim_action)
+        menu.addAction(self.reset_timeline_action)
         menu.addSeparator()
         menu.addAction(self.create_crop_action)
         menu.addAction(self.reset_crop_action)
@@ -924,6 +958,16 @@ class MainWindow(QMainWindow):
                 valid = frame >= 0 and self._apply_info_trim(
                     key.startswith("trim_in"), self._frame_to_position_ms(frame)
                 )
+            elif key in {"timeline_start_time", "timeline_end_time"}:
+                position_ms = _parse_time_to_ms(value)
+                valid = position_ms is not None and self._apply_info_timeline(
+                    key.startswith("timeline_start"), position_ms
+                )
+            elif key in {"timeline_start_frame", "timeline_end_frame"}:
+                frame = int(value)
+                valid = frame >= 0 and self._apply_info_timeline(
+                    key.startswith("timeline_start"), self._frame_to_position_ms(frame)
+                )
             elif key.startswith("crop_"):
                 valid = self._apply_info_crop()
         except ValueError:
@@ -988,6 +1032,14 @@ class MainWindow(QMainWindow):
         self.crop_overlay.show()
         return True
 
+    def _apply_info_timeline(self, is_start: bool, position_ms: int) -> bool:
+        start_ms, end_ms = self.timeline_widget.view_range()
+        if is_start:
+            start_ms = position_ms
+        else:
+            end_ms = position_ms
+        return self.timeline_widget.set_view_range(start_ms, end_ms)
+
     def _refresh_metadata(self, force: bool = False) -> None:
         if self._session is None:
             self.info_panel.set_fields_enabled(False)
@@ -995,6 +1047,7 @@ class MainWindow(QMainWindow):
             return
 
         trim_in_ms, trim_out_ms = self.timeline_widget.trim_range()
+        timeline_start_ms, timeline_end_ms = self.timeline_widget.view_range()
         crop = self._session.crop
         current_ms = self.timeline_widget.position()
         values = {
@@ -1007,6 +1060,10 @@ class MainWindow(QMainWindow):
             "trim_in_frame": str(self._position_to_frame(trim_in_ms)),
             "trim_out_time": _format_time(trim_out_ms / 1000.0),
             "trim_out_frame": str(self._position_to_frame(trim_out_ms)),
+            "timeline_start_time": _format_time(timeline_start_ms / 1000.0),
+            "timeline_start_frame": str(self._position_to_frame(timeline_start_ms)),
+            "timeline_end_time": _format_time(timeline_end_ms / 1000.0),
+            "timeline_end_frame": str(self._position_to_frame(timeline_end_ms)),
             "crop_x": str(crop.x) if crop else "",
             "crop_y": str(crop.y) if crop else "",
             "crop_width": str(crop.width) if crop else "",

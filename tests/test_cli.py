@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
-from cropbox.__main__ import _build_initial_crop, _build_initial_trim, _build_parser, _parse_time_value
+from cropbox.__main__ import (
+    _build_initial_crop,
+    _build_initial_trim,
+    _build_parser,
+    _parse_time_value,
+)
 
 
 def test_parse_time_value_seconds() -> None:
