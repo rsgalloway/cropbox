@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from cropbox.models.crop_rect import CropRect
 
@@ -13,12 +13,23 @@ def _build_crop_filter(crop: CropRect) -> str:
     )
 
 
-def _build_gif_filter(crop: Optional[CropRect]) -> str:
+def _build_scale_filter(output_size: Tuple[int, int]) -> str:
+    return f"scale={output_size[0]}:{output_size[1]}:flags=lanczos"
+
+
+def _build_gif_filter(
+    crop: Optional[CropRect],
+    output_size: Optional[Tuple[int, int]],
+    colors: int,
+) -> str:
     video_chain = "[0:v]"
     if crop is not None:
         video_chain += _build_crop_filter(crop)
         video_chain += ","
-    video_chain += "split[v0][v1];[v0]palettegen[p];[v1][p]paletteuse[vout]"
+    if output_size is not None:
+        video_chain += _build_scale_filter(output_size)
+        video_chain += ","
+    video_chain += f"split[v0][v1];[v0]palettegen=max_colors={colors}[p];" "[v1][p]paletteuse[vout]"
     return video_chain
 
 
@@ -46,6 +57,9 @@ def build_export_command(
     crop: Optional[CropRect],
     playback_rate: float = 1.0,
     has_audio: bool = True,
+    output_size: Optional[Tuple[int, int]] = None,
+    crf: int = 23,
+    gif_colors: int = 256,
 ) -> List[str]:
     suffix = output_path.suffix.lower()
     command: List[str] = [
@@ -61,7 +75,7 @@ def build_export_command(
     ]
 
     if suffix == ".gif":
-        gif_filter = _build_gif_filter(crop)
+        gif_filter = _build_gif_filter(crop, output_size, gif_colors)
         if playback_rate != 1.0:
             gif_filter = gif_filter.replace("[0:v]", f"[0:v]setpts=PTS/{playback_rate:.3f},", 1)
         command.extend(
@@ -81,6 +95,8 @@ def build_export_command(
     filters = []
     if crop is not None:
         filters.append(_build_crop_filter(crop))
+    if output_size is not None:
+        filters.append(_build_scale_filter(output_size))
     if playback_rate != 1.0:
         filters.append(f"setpts=PTS/{playback_rate:.3f}")
 
@@ -90,11 +106,16 @@ def build_export_command(
     if has_audio and playback_rate != 1.0:
         command.extend(["-filter:a", ",".join(_build_atempo_filters(playback_rate))])
 
-    command.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+    command.extend(["-c:v", "libx264", "-crf", str(crf), "-pix_fmt", "yuv420p"])
+    if not has_audio:
+        command.append("-an")
     if suffix in {".mp4", ".mov"}:
-        command.extend(["-c:a", "aac", "-movflags", "+faststart"])
+        if has_audio:
+            command.extend(["-c:a", "aac"])
+        command.extend(["-movflags", "+faststart"])
     else:
-        command.extend(["-c:a", "aac"])
+        if has_audio:
+            command.extend(["-c:a", "aac"])
 
     command.append(str(output_path))
     return command

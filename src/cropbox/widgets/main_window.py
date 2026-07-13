@@ -30,6 +30,7 @@ from cropbox.models.crop_rect import CropRect
 from cropbox.models.edit_session import EditSession
 from cropbox.models.trim_range import TrimRange
 from cropbox.widgets.crop_overlay import CropOverlay
+from cropbox.widgets.export_dialog import ExportDialog
 from cropbox.widgets.info_panel import InfoPanel
 from cropbox.widgets.player_widget import PlayerWidget
 from cropbox.widgets.timeline import TimelineWidget
@@ -632,26 +633,38 @@ class MainWindow(QMainWindow):
         if not self._check_media_tools(["ffmpeg"]):
             return
 
-        output_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save As",
-            self._session.media.path.with_suffix(".mp4").as_posix(),
-            "Video Files (*.mp4 *.mov *.gif)",
+        crop = self._session.crop or CropRect(
+            x=0,
+            y=0,
+            width=self._session.media.width,
+            height=self._session.media.height,
         )
-        if not output_path:
+        dialog = ExportDialog(
+            source_path=self._session.media.path,
+            source_size=(crop.width, crop.height),
+            has_audio=self._session.media.has_audio,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        options = dialog.options()
+        if options is None:
             return
 
         normalized = self._session.trim.normalized()
         command = build_export_command(
             input_path=self._session.media.path,
-            output_path=Path(output_path),
+            output_path=options.output_path,
             trim_start=normalized.start,
             trim_end=normalized.end,
             crop=self._effective_crop_for_export(),
             playback_rate=self._playback_rate,
-            has_audio=self._session.media.has_audio,
+            has_audio=self._session.media.has_audio and options.include_audio,
+            output_size=options.output_size,
+            crf=options.crf,
+            gif_colors=options.gif_colors,
         )
-        self._exporter.start(command, Path(output_path))
+        self._exporter.start(command, options.output_path)
 
     def _effective_crop_for_export(self) -> Optional[CropRect]:
         if self._session is None:

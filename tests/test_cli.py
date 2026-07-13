@@ -36,3 +36,11 @@ def test_build_initial_crop_from_args() -> None:
     assert crop.y == 20
     assert crop.width == 300
     assert crop.height == 200
+
+
+def test_parser_accepts_headless_output_options() -> None:
+    parser = _build_parser()
+    args = parser.parse_args(["input.mp4", "-o", "output.mp4", "--force"])
+
+    assert str(args.out) == "output.mp4"
+    assert args.force is True

@@ -48,7 +48,9 @@ def test_build_export_command_gif_disables_audio() -> None:
     )
 
     assert "-filter_complex" in command
-    assert "[0:v]split[v0][v1];[v0]palettegen[p];[v1][p]paletteuse[vout]" in command
+    assert (
+        "[0:v]split[v0][v1];[v0]palettegen=max_colors=256[p];" "[v1][p]paletteuse[vout]" in command
+    )
     assert "-map" in command
     assert "[vout]" in command
     assert "-an" in command
@@ -67,7 +69,8 @@ def test_build_export_command_gif_with_crop_uses_filter_complex_crop() -> None:
 
     assert "-filter_complex" in command
     assert (
-        "[0:v]crop=200:100:10:20,split[v0][v1];[v0]palettegen[p];[v1][p]paletteuse[vout]" in command
+        "[0:v]crop=200:100:10:20,split[v0][v1];"
+        "[v0]palettegen=max_colors=256[p];[v1][p]paletteuse[vout]" in command
     )
 
 
@@ -83,5 +86,41 @@ def test_build_export_command_gif_with_playback_rate_uses_setpts() -> None:
 
     assert "-filter_complex" in command
     assert (
-        "[0:v]setpts=PTS/0.500,split[v0][v1];[v0]palettegen[p];[v1][p]paletteuse[vout]" in command
+        "[0:v]setpts=PTS/0.500,split[v0][v1];"
+        "[v0]palettegen=max_colors=256[p];[v1][p]paletteuse[vout]" in command
+    )
+
+
+def test_build_export_command_adds_scale_quality_and_disables_audio() -> None:
+    command = build_export_command(
+        input_path=Path("input.mp4"),
+        output_path=Path("output.mp4"),
+        trim_start=0.0,
+        trim_end=2.0,
+        crop=CropRect(x=10, y=20, width=1920, height=1080),
+        has_audio=False,
+        output_size=(1280, 720),
+        crf=18,
+    )
+
+    assert "crop=1920:1080:10:20,scale=1280:720:flags=lanczos" in command
+    assert command[command.index("-crf") + 1] == "18"
+    assert "-an" in command
+    assert "-c:a" not in command
+
+
+def test_build_export_command_gif_adds_scale_and_palette_colors() -> None:
+    command = build_export_command(
+        input_path=Path("input.mp4"),
+        output_path=Path("output.gif"),
+        trim_start=0.0,
+        trim_end=2.0,
+        crop=None,
+        output_size=(640, 360),
+        gif_colors=64,
+    )
+
+    assert (
+        "[0:v]scale=640:360:flags=lanczos,split[v0][v1];"
+        "[v0]palettegen=max_colors=64[p];[v1][p]paletteuse[vout]" in command
     )

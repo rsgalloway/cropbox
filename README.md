@@ -16,8 +16,10 @@ A lightweight desktop utility for trimming, cropping, previewing, and exporting 
 - Dockable Info panel for editing playback, trim, and crop values
 - Frame stepping and trim-handle nudging from the keyboard
 - Playback speed control for preview and export
+- Export dialog with format, size, quality, and audio presets
+- Remembered export settings and output folder
 - FFmpeg export to MP4, MOV, and GIF
-- CLI startup options for media, trim, and crop values
+- Headless CLI export with media, trim, and crop options
 - Python 3.8–3.12
 - PySide6 desktop UI
 
@@ -82,8 +84,22 @@ Open with initial trim and crop values:
 cropbox input.mp4 --trim-in 12.5 --trim-out 00:00:20.000 --crop 100 50 1280 720
 ```
 
+Export directly without opening the UI:
+
+```bash
+cropbox big_buck_bunny_1080p_h264.mov -o big_buck_bunny.mp4
+```
+
+Export with trim and crop values:
+
+```bash
+cropbox input.mp4 --out output.mp4 --trim-in 12.5 --trim-out 20 --crop 100 50 1280 720
+```
+
 ## CLI Options
 
+- `-o, --out PATH`: export directly to MP4, MOV, or GIF without opening the UI
+- `-f, --force`: overwrite an existing `--out` file
 - `--trim-in`: initial trim-in time in seconds or `HH:MM:SS.mmm`
 - `--trim-out`: initial trim-out time in seconds or `HH:MM:SS.mmm`
 - `--crop X Y WIDTH HEIGHT`: initial crop rectangle in source pixels
@@ -91,6 +107,9 @@ cropbox input.mp4 --trim-in 12.5 --trim-out 00:00:20.000 --crop 100 50 1280 720
 ## Notes
 
 - Playback speed affects both preview and export.
+- Headless export defaults to the full media duration when `--trim-out` is omitted.
+- Export size presets preserve the cropped aspect ratio and report the resulting dimensions.
+- High, Balanced, and Smaller File presets control H.264 quality or GIF palette size.
 - Exact trim-in and trim-out values can also be entered from the Edit menu.
 - Press Enter in an Info panel field to apply current time/frame, playback FPS, trim, timeline viewport, or crop changes.
 - Timeline Start and End zoom the visible timeline, but cannot exclude the trim range; expanding trim automatically expands the timeline viewport.

@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import argparse
+import logging
+from pathlib import Path
 from typing import Optional
 
 from cropbox.models.crop_rect import CropRect
 from cropbox.models.trim_range import TrimRange
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _parse_time_value(value: str) -> float:
@@ -28,6 +33,18 @@ def _parse_time_value(value: str) -> float:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cropbox")
     parser.add_argument("media", nargs="?", help="Optional media path to open on launch")
+    parser.add_argument(
+        "-o",
+        "--out",
+        type=Path,
+        help="Export directly to MP4, MOV, or GIF without opening the UI",
+    )
+    parser.add_argument(
+        "-f",
+        "--force",
+        action="store_true",
+        help="Overwrite an existing --out file",
+    )
     parser.add_argument(
         "--trim-in",
         dest="trim_in",
@@ -83,11 +100,35 @@ def _build_initial_crop(
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
-    if args.media is None and (args.trim_in is not None or args.trim_out is not None or args.crop):
-        parser.error("media path is required when using --trim-in, --trim-out, or --crop")
+    if args.media is None and (
+        args.out is not None or args.trim_in is not None or args.trim_out is not None or args.crop
+    ):
+        parser.error("media path is required when using --out, --trim-in, --trim-out, or --crop")
+    if args.force and args.out is None:
+        parser.error("--force can only be used with --out")
 
     initial_trim = _build_initial_trim(args, parser)
     initial_crop = _build_initial_crop(args, parser)
+    if args.out is not None:
+        from cropbox.logging_utils import configure_logging
+        from cropbox.media.headless import HeadlessExportError, export_media
+
+        configure_logging()
+        trim_start = initial_trim.start if initial_trim is not None else 0.0
+        trim_end = _parse_time_value(args.trim_out) if args.trim_out is not None else None
+        try:
+            return export_media(
+                input_path=Path(args.media),
+                output_path=args.out,
+                trim_start=trim_start,
+                trim_end=trim_end,
+                crop=initial_crop,
+                force=args.force,
+            )
+        except HeadlessExportError as exc:
+            LOGGER.error("%s", exc)
+            return 1
+
     from cropbox.app import main as run_app
 
     return run_app(
