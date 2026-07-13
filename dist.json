@@ -1,0 +1,13 @@
+{
+    "author": "ryan@rsg.io",
+    "targets": {
+        "bin": {
+            "source": "bin/*",
+            "destination": "{DEPLOY_ROOT}/bin/%1"
+        },
+        "lib": {
+            "source": "src/cropbox",
+            "destination": "{DEPLOY_ROOT}/lib/python/cropbox"
+        }
+    }
+}
