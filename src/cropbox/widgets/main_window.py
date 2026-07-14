@@ -1,8 +1,17 @@
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import QEvent, QSignalBlocker, QSize, Qt, QUrl
-from PySide6.QtGui import QAction, QActionGroup, QIcon, QImage, QKeySequence, QMovie, QShortcut
+from PySide6.QtCore import QEvent, QSignalBlocker, QSize, Qt, QTimer, QUrl
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QIcon,
+    QImage,
+    QImageReader,
+    QKeySequence,
+    QMovie,
+    QShortcut,
+)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame, QVideoSink
 from PySide6.QtWidgets import (
     QDialog,
@@ -22,10 +31,12 @@ from PySide6.QtWidgets import (
 )
 
 from cropbox import __version__
+from cropbox.__main__ import InitialPosition
 from cropbox.media.commands import build_export_command
 from cropbox.media.dependencies import missing_media_tools
 from cropbox.media.exporter import Exporter
 from cropbox.media.probe import ProbeError, probe_media
+from cropbox.media.thumbnails import ThumbnailGenerator, ThumbnailRequest
 from cropbox.models.crop_rect import CropRect
 from cropbox.models.edit_session import EditSession
 from cropbox.models.trim_range import TrimRange
@@ -167,6 +178,7 @@ class MainWindow(QMainWindow):
         initial_media_path: Optional[Path] = None,
         initial_trim: Optional[TrimRange] = None,
         initial_crop: Optional[CropRect] = None,
+        initial_position: Optional[InitialPosition] = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle("Cropbox")
@@ -191,6 +203,16 @@ class MainWindow(QMainWindow):
         self._playback_speed_actions: Dict[float, QAction] = {}
         self._initial_trim = initial_trim
         self._initial_crop = initial_crop
+        self._initial_position = initial_position
+        self._pending_initial_seek_ms: Optional[int] = None
+        self._show_frame_values = False
+        self._thumbnail_job_id = 0
+        self._thumbnail_media_path: Optional[Path] = None
+        self._thumbnail_generator = ThumbnailGenerator(self)
+        self._thumbnail_refresh_timer = QTimer(self)
+        self._thumbnail_refresh_timer.setSingleShot(True)
+        self._thumbnail_refresh_timer.setInterval(180)
+        self._thumbnail_request_signature: Optional[tuple] = None
 
         self._build_ui()
         self._build_menus()
@@ -248,6 +270,9 @@ class MainWindow(QMainWindow):
         self.mute_button.setAutoRaise(False)
 
         self.position_label = QLabel("00:00:00.000", self)
+        self.position_label.setStyleSheet(
+            "background-color: #0f1418; color: #dbe2e8; padding: 0 8px;"
+        )
 
         transport_row = QHBoxLayout()
         transport_row.addWidget(self.timeline_widget, stretch=1)
@@ -346,6 +371,11 @@ class MainWindow(QMainWindow):
         self.show_annotations_action.setChecked(True)
         self.show_annotations_action.toggled.connect(self._set_annotations_visible)
 
+        self.show_frame_values_action = QAction("Show Frame Values", self)
+        self.show_frame_values_action.setCheckable(True)
+        self.show_frame_values_action.setChecked(False)
+        self.show_frame_values_action.toggled.connect(self._set_show_frame_values)
+
         self.playback_speed_group = QActionGroup(self)
         self.playback_speed_group.setExclusive(True)
         for label, rate in self.PLAYBACK_SPEEDS:
@@ -395,6 +425,7 @@ class MainWindow(QMainWindow):
 
         view_menu.addAction(self.show_metadata_action)
         view_menu.addAction(self.show_annotations_action)
+        view_menu.addAction(self.show_frame_values_action)
 
         help_menu.addAction(install_ffmpeg_action)
         help_menu.addSeparator()
@@ -429,7 +460,10 @@ class MainWindow(QMainWindow):
         self.mute_button.clicked.connect(self.toggle_mute)
         self.timeline_widget.seekRequested.connect(self._seek_from_timeline)
         self.timeline_widget.trimChanged.connect(self._timeline_trim_changed)
-        self.timeline_widget.viewChanged.connect(lambda _start, _end: self._refresh_metadata())
+        self.timeline_widget.viewChanged.connect(self._on_timeline_view_changed)
+        self.timeline_widget.thumbnailGeometryChanged.connect(
+            self._schedule_thumbnail_refresh_for_resize
+        )
         self.crop_overlay.cropChanged.connect(self._overlay_crop_changed)
         self.crop_overlay.cropEditFinished.connect(self._sync_transform_preview)
         self.video_container.customContextMenuRequested.connect(self._show_video_context_menu)
@@ -438,19 +472,23 @@ class MainWindow(QMainWindow):
 
         self._media_player.positionChanged.connect(self._on_position_changed)
         self._media_player.durationChanged.connect(self._on_duration_changed)
+        self._media_player.mediaStatusChanged.connect(self._on_media_status_changed)
         self._media_player.playbackStateChanged.connect(self._on_playback_state_changed)
+        self._thumbnail_refresh_timer.timeout.connect(self._refresh_timeline_thumbnails)
+        self._thumbnail_generator.thumbnailReady.connect(self._on_thumbnail_ready)
 
         self._exporter.finished.connect(self._on_export_finished)
         self._exporter.failed.connect(self._on_export_failed)
 
     def _update_controls_for_session(self) -> None:
         enabled = self._session is not None
-        self.play_button.setEnabled(enabled)
-        self.timeline_widget.setEnabled(enabled)
-        self.set_trim_in_action.setEnabled(enabled)
-        self.set_trim_out_action.setEnabled(enabled)
-        self.reset_trim_action.setEnabled(enabled)
-        self.reset_timeline_action.setEnabled(enabled)
+        timeline_enabled = enabled and not self._is_still_image_mode()
+        self.play_button.setEnabled(timeline_enabled)
+        self.timeline_widget.setEnabled(timeline_enabled)
+        self.set_trim_in_action.setEnabled(timeline_enabled)
+        self.set_trim_out_action.setEnabled(timeline_enabled)
+        self.reset_trim_action.setEnabled(timeline_enabled)
+        self.reset_timeline_action.setEnabled(timeline_enabled)
         self.create_crop_action.setEnabled(enabled)
         self.reset_crop_action.setEnabled(enabled)
         self.resize_action.setEnabled(enabled)
@@ -460,10 +498,11 @@ class MainWindow(QMainWindow):
         self.flip_horizontal_action.setEnabled(enabled)
         self.flip_vertical_action.setEnabled(enabled)
         self.reset_transform_action.setEnabled(enabled)
-        self.loop_playback_action.setEnabled(enabled)
+        self.loop_playback_action.setEnabled(timeline_enabled)
         self.mute_button.setEnabled(
-            enabled and bool(self._session and self._session.media.has_audio)
+            timeline_enabled and bool(self._session and self._session.media.has_audio)
         )
+        self._update_info_panel_field_states()
 
     def _warn_missing_media_tools(self) -> None:
         if not self._missing_tools:
@@ -497,23 +536,31 @@ class MainWindow(QMainWindow):
         return False
 
     def open_media(self) -> None:
-        if not self._check_media_tools(["ffprobe"]):
-            return
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Open Media",
             "",
-            "Media Files (*.mp4 *.mov *.mkv *.webm *.gif);;All Files (*)",
+            "Media Files (*.mp4 *.mov *.mkv *.webm *.gif *.png *.jpg *.jpeg *.bmp *.webp);;All Files (*)",
         )
         if not file_path:
             return
-        self._load_media(Path(file_path))
+        path = Path(file_path)
+        if not self._is_supported_still_image(path) and not self._check_media_tools(["ffprobe"]):
+            return
+        self._load_media(path)
 
     def _is_gif_media(self, path: Path) -> bool:
         return path.suffix.lower() == ".gif"
 
+    def _is_supported_still_image(self, path: Path) -> bool:
+        reader = QImageReader(str(path))
+        return reader.canRead()
+
     def _is_gif_mode(self) -> bool:
         return self._gif_movie is not None
+
+    def _is_still_image_mode(self) -> bool:
+        return bool(self._session and self._session.media.is_still_image)
 
     def _set_play_icon(self, is_playing: bool) -> None:
         if is_playing:
@@ -526,6 +573,11 @@ class MainWindow(QMainWindow):
         self.mute_button.setIcon(self._muted_icon if is_muted else self._audio_icon)
         self.mute_button.setChecked(is_muted)
         self.mute_button.setToolTip("Unmute" if is_muted else "Mute")
+
+    def _format_transport_value(self, position_ms: int) -> str:
+        if self._show_frame_values:
+            return f"x{self._position_to_frame(position_ms)}"
+        return _format_time(position_ms / 1000.0)
 
     def _apply_playback_rate(self) -> None:
         self._media_player.setPlaybackRate(self._playback_rate)
@@ -571,7 +623,7 @@ class MainWindow(QMainWindow):
         frame_number = self._position_to_frame(clamped)
         if not self._gif_movie.jumpToFrame(frame_number):
             self._gif_position_ms = clamped
-            self.position_label.setText(_format_time(clamped / 1000.0))
+            self.position_label.setText(self._format_transport_value(clamped))
             self.timeline_widget.set_position(clamped)
 
     def _load_gif_movie(self, path: Path) -> None:
@@ -611,10 +663,13 @@ class MainWindow(QMainWindow):
         self._apply_initial_edit_options()
         self._fps = media_info.frame_rate
         self._duration_ms = max(int(media_info.duration * 1000), 0)
+        self._thumbnail_request_signature = None
+        self._pending_initial_seek_ms = None
 
         initial_trim = self._session.trim.normalized()
         trim_in_ms = max(int(initial_trim.start * 1000), 0)
         trim_out_ms = max(int(initial_trim.end * 1000), 0)
+        self.timeline_widget.clear_thumbnails()
         self.timeline_widget.reset_view_range()
         self.timeline_widget.set_duration(self._duration_ms)
         self.timeline_widget.set_frame_rate(self._fps)
@@ -628,23 +683,36 @@ class MainWindow(QMainWindow):
         self._media_player.stop()
         self._media_player.setSource(QUrl())
 
-        if self._is_gif_media(path):
+        if media_info.is_still_image:
+            self._stop_gif_movie()
+            image = QImageReader(str(path)).read()
+            if image.isNull():
+                QMessageBox.critical(
+                    self, "Open Failed", "Qt could not decode this image for preview."
+                )
+                return
+            if image.format() != QImage.Format_RGB32:
+                image = image.convertToFormat(QImage.Format_RGB32)
+            self.video_widget.set_frame(image)
+        elif self._is_gif_media(path):
             self._load_gif_movie(path)
         else:
             self._stop_gif_movie()
             self._media_player.setSource(QUrl.fromLocalFile(str(path)))
-            self._media_player.setPosition(trim_in_ms)
             self._media_player.pause()
             self._apply_playback_rate()
 
         if self._is_gif_mode():
             self._seek_gif(trim_in_ms)
+        self._apply_initial_position()
 
         self._audio_output.setMuted(True)
         self._update_mute_button()
         if not media_info.has_audio:
             self.mute_button.setEnabled(False)
 
+        self._thumbnail_media_path = None if media_info.is_still_image else path
+        self._schedule_thumbnail_refresh(delay_ms=0)
         self._refresh_trim_labels()
         self._update_controls_for_session()
         self._sync_video_overlay_geometry()
@@ -672,6 +740,44 @@ class MainWindow(QMainWindow):
             self._session.crop = CropRect(x=x, y=y, width=width, height=height)
             self._initial_crop = None
 
+    def _apply_initial_position(self) -> None:
+        if self._initial_position is None or self._session is None or self._is_still_image_mode():
+            return
+
+        if self._initial_position.frame is not None:
+            position_ms = self._frame_to_position_ms(self._initial_position.frame)
+        elif self._initial_position.time_seconds is not None:
+            position_ms = int(round(self._initial_position.time_seconds * 1000.0))
+        else:
+            self._initial_position = None
+            return
+
+        trim_in_ms, trim_out_ms = self.timeline_widget.trim_range()
+        clamped = max(trim_in_ms, min(position_ms, trim_out_ms))
+        self.timeline_widget.set_position(clamped)
+        self.position_label.setText(self._format_transport_value(clamped))
+        if self._is_gif_mode():
+            self._seek_gif(clamped)
+        else:
+            self._pending_initial_seek_ms = clamped
+            if self._media_player.mediaStatus() != QMediaPlayer.MediaStatus.NoMedia:
+                self._media_player.setPosition(clamped)
+        self._initial_position = None
+
+    def _apply_pending_initial_seek(self) -> bool:
+        if self._pending_initial_seek_ms is None or self._session is None or self._is_gif_mode():
+            return False
+        position_ms = self._pending_initial_seek_ms
+        trim_in_ms, trim_out_ms = self.timeline_widget.trim_range()
+        clamped = max(trim_in_ms, min(position_ms, trim_out_ms))
+        if self._media_player.position() != clamped:
+            self._media_player.setPosition(clamped)
+            return True
+        self.timeline_widget.set_position(clamped)
+        self.position_label.setText(self._format_transport_value(clamped))
+        self._pending_initial_seek_ms = None
+        return True
+
     def save_as(self) -> None:
         if self._session is None:
             QMessageBox.information(self, "No Media", "Open a media file first.")
@@ -689,6 +795,7 @@ class MainWindow(QMainWindow):
             source_path=self._session.media.path,
             source_size=self._session.transform.output_size(crop.width, crop.height),
             has_audio=self._session.media.has_audio,
+            source_is_still_image=self._session.media.is_still_image,
             parent=self,
         )
         if dialog.exec() != QDialog.Accepted:
@@ -710,6 +817,7 @@ class MainWindow(QMainWindow):
             crf=options.crf,
             gif_colors=options.gif_colors,
             transform=self._session.transform,
+            source_is_still_image=options.source_is_still_image,
         )
         self._exporter.start(command, options.output_path)
 
@@ -1084,6 +1192,11 @@ class MainWindow(QMainWindow):
         self.crop_overlay.set_annotations_visible(visible)
         self.timeline_widget.set_annotations_visible(visible)
 
+    def _set_show_frame_values(self, show_frames: bool) -> None:
+        self._show_frame_values = show_frames
+        self.timeline_widget.set_show_frame_values(show_frames)
+        self.position_label.setText(self._format_transport_value(self.timeline_widget.position()))
+
     def _apply_info_value(self, key: str, value: str) -> None:
         if self._session is None:
             return
@@ -1135,7 +1248,7 @@ class MainWindow(QMainWindow):
         if position_ms < trim_in_ms or position_ms > trim_out_ms:
             return False
         self.timeline_widget.set_position(position_ms)
-        self.position_label.setText(_format_time(position_ms / 1000.0))
+        self.position_label.setText(self._format_transport_value(position_ms))
         if self._is_gif_mode():
             self._seek_gif(position_ms)
         else:
@@ -1193,9 +1306,89 @@ class MainWindow(QMainWindow):
             end_ms = position_ms
         return self.timeline_widget.set_view_range(start_ms, end_ms)
 
+    def _on_timeline_view_changed(self, _start: int, _end: int) -> None:
+        self._refresh_metadata()
+        self._schedule_thumbnail_refresh()
+
+    def _schedule_thumbnail_refresh(self, delay_ms: int = 180) -> None:
+        if (
+            self._session is None
+            or self._thumbnail_media_path is None
+            or self._is_still_image_mode()
+        ):
+            return
+        if "ffmpeg" in self._missing_tools:
+            self.timeline_widget.clear_thumbnails()
+            return
+        self._thumbnail_refresh_timer.start(delay_ms)
+
+    def _schedule_thumbnail_refresh_for_resize(self) -> None:
+        self._schedule_thumbnail_refresh(delay_ms=400)
+
+    def _refresh_timeline_thumbnails(self) -> None:
+        if (
+            self._session is None
+            or self._thumbnail_media_path is None
+            or self._is_still_image_mode()
+        ):
+            self.timeline_widget.clear_thumbnails()
+            return
+
+        start_ms, end_ms = self.timeline_widget.view_range()
+        thumb_width, thumb_height, count = self.timeline_widget.thumbnail_request_geometry()
+        if count <= 0 or thumb_width <= 0 or thumb_height <= 0 or end_ms <= start_ms:
+            self.timeline_widget.clear_thumbnails()
+            return
+        signature = (
+            str(self._thumbnail_media_path),
+            start_ms,
+            end_ms,
+            thumb_width,
+            thumb_height,
+            count,
+        )
+        if signature == self._thumbnail_request_signature:
+            return
+
+        span_ms = max(end_ms - start_ms, 1)
+        if count == 1:
+            positions = [start_ms + (span_ms // 2)]
+        else:
+            step = span_ms / float(count)
+            positions = [
+                min(end_ms, max(start_ms, int(round(start_ms + (step * (index + 0.5))))))
+                for index in range(count)
+            ]
+
+        self._thumbnail_job_id += 1
+        job_id = self._thumbnail_job_id
+        self._thumbnail_request_signature = signature
+        self.timeline_widget.set_thumbnail_request(job_id, start_ms, end_ms, positions)
+        self._thumbnail_generator.submit(
+            ThumbnailRequest(
+                job_id=job_id,
+                media_path=self._thumbnail_media_path,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                thumb_width=thumb_width,
+                thumb_height=thumb_height,
+                count=count,
+            )
+        )
+
+    def _on_thumbnail_ready(
+        self,
+        job_id: int,
+        index: int,
+        position_ms: int,
+        image: QImage,
+    ) -> None:
+        self.timeline_widget.set_thumbnail(job_id, index, position_ms, image)
+
     def _refresh_metadata(self, force: bool = False) -> None:
         if self._session is None:
             self.info_panel.set_fields_enabled(False)
+            self.info_panel.set_metadata({})
             self.info_panel.source_size_label.setText("Source: -")
             return
 
@@ -1212,6 +1405,13 @@ class MainWindow(QMainWindow):
             output_crop.width, output_crop.height
         )
         current_ms = self.timeline_widget.position()
+        media = self._session.media
+        if media.is_still_image:
+            current_ms = 0
+            trim_in_ms = 0
+            trim_out_ms = 0
+            timeline_start_ms = 0
+            timeline_end_ms = 0
         values = {
             "current_time": _format_time(current_ms / 1000.0),
             "current_frame": str(self._position_to_frame(current_ms)),
@@ -1232,11 +1432,46 @@ class MainWindow(QMainWindow):
             "crop_height": str(crop.height) if crop else "",
         }
         self.info_panel.set_fields_enabled(True)
+        self.info_panel.set_metadata(
+            {
+                "source_type": "Still Image" if media.is_still_image else "Timed Media",
+                "source_container": media.container or "-",
+                "source_video_codec": media.video_codec or "-",
+                "source_audio_codec": media.audio_codec or ("None" if not media.has_audio else "-"),
+                "source_duration": (
+                    "Still image" if media.is_still_image else _format_time(media.duration)
+                ),
+                "source_frame_rate": (
+                    "-" if media.frame_rate is None else f"{media.frame_rate:.3f} fps"
+                ),
+            }
+        )
         self.info_panel.source_size_label.setText(
-            f"Source: {self._session.media.width} x {self._session.media.height} | "
-            f"Output: {output_width} x {output_height}"
+            f"Source: {media.width} x {media.height} | " f"Output: {output_width} x {output_height}"
         )
         self.info_panel.set_values(values, force=force)
+        self._update_info_panel_field_states()
+
+    def _update_info_panel_field_states(self) -> None:
+        field_state = {
+            "current_time": not self._is_still_image_mode(),
+            "current_frame": not self._is_still_image_mode(),
+            "playback_fps": not self._is_still_image_mode(),
+            "trim_in_time": not self._is_still_image_mode(),
+            "trim_in_frame": not self._is_still_image_mode(),
+            "trim_out_time": not self._is_still_image_mode(),
+            "trim_out_frame": not self._is_still_image_mode(),
+            "timeline_start_time": not self._is_still_image_mode(),
+            "timeline_start_frame": not self._is_still_image_mode(),
+            "timeline_end_time": not self._is_still_image_mode(),
+            "timeline_end_frame": not self._is_still_image_mode(),
+            "crop_x": self._session is not None,
+            "crop_y": self._session is not None,
+            "crop_width": self._session is not None,
+            "crop_height": self._session is not None,
+        }
+        for key, enabled in field_state.items():
+            self.info_panel.set_field_enabled(key, enabled)
 
     def eventFilter(self, watched, event) -> bool:
         if watched in {self.video_container, self.video_frame} and event.type() in {
@@ -1282,7 +1517,7 @@ class MainWindow(QMainWindow):
                     position = trim_out_ms
 
         self._gif_position_ms = position
-        self.position_label.setText(_format_time(position / 1000.0))
+        self.position_label.setText(self._format_transport_value(position))
         self.timeline_widget.set_position(position)
         self._refresh_metadata()
 
@@ -1290,6 +1525,9 @@ class MainWindow(QMainWindow):
         self._refresh_metadata()
 
     def _on_position_changed(self, position: int) -> None:
+        if self._apply_pending_initial_seek():
+            position = self._media_player.position()
+
         trim_in_ms, trim_out_ms = self.timeline_widget.trim_range()
         if (
             self._session is not None
@@ -1306,7 +1544,7 @@ class MainWindow(QMainWindow):
                     self._media_player.setPosition(trim_out_ms)
                 return
 
-        self.position_label.setText(_format_time(position / 1000.0))
+        self.position_label.setText(self._format_transport_value(position))
         self.timeline_widget.set_position(position)
         self._refresh_metadata()
 
@@ -1322,6 +1560,15 @@ class MainWindow(QMainWindow):
                 self.timeline_widget.set_trim_range(in_value, duration)
                 self._timeline_trim_changed(in_value, duration)
 
+        self._apply_pending_initial_seek()
+
+    def _on_media_status_changed(self, status: QMediaPlayer.MediaStatus) -> None:
+        if status in {
+            QMediaPlayer.MediaStatus.LoadedMedia,
+            QMediaPlayer.MediaStatus.BufferedMedia,
+        }:
+            self._apply_pending_initial_seek()
+
     def _on_playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
         self._set_play_icon(state == QMediaPlayer.PlayingState)
 
@@ -1330,3 +1577,7 @@ class MainWindow(QMainWindow):
 
     def _on_export_failed(self, message: str) -> None:
         QMessageBox.critical(self, "Export Failed", message)
+
+    def closeEvent(self, event) -> None:
+        self._thumbnail_generator.stop()
+        super().closeEvent(event)

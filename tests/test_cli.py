@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from cropbox.__main__ import (
+    _build_initial_position,
     _build_initial_crop,
     _build_initial_trim,
+    InitialPosition,
     _build_parser,
     _parse_time_value,
 )
@@ -44,3 +46,19 @@ def test_parser_accepts_headless_output_options() -> None:
 
     assert str(args.out) == "output.mp4"
     assert args.force is True
+
+
+def test_build_initial_position_from_time_args() -> None:
+    parser = _build_parser()
+    args = parser.parse_args(["input.mp4", "--current-time", "00:00:02.500"])
+    position = _build_initial_position(args, parser)
+
+    assert position == InitialPosition(time_seconds=2.5)
+
+
+def test_build_initial_position_from_frame_args() -> None:
+    parser = _build_parser()
+    args = parser.parse_args(["input.mp4", "--current-frame", "42"])
+    position = _build_initial_position(args, parser)
+
+    assert position == InitialPosition(frame=42)

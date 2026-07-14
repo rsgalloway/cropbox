@@ -103,19 +103,20 @@ def build_export_command(
     crf: int = 23,
     gif_colors: int = 256,
     transform: Optional[TransformState] = None,
+    source_is_still_image: bool = False,
 ) -> List[str]:
     suffix = output_path.suffix.lower()
-    command: List[str] = [
-        "ffmpeg",
-        "-hide_banner",
-        "-y",
-        "-ss",
-        f"{trim_start:.3f}",
-        "-to",
-        f"{trim_end:.3f}",
-        "-i",
-        str(input_path),
-    ]
+    command: List[str] = ["ffmpeg", "-hide_banner", "-y"]
+    if not source_is_still_image:
+        command.extend(
+            [
+                "-ss",
+                f"{trim_start:.3f}",
+                "-to",
+                f"{trim_end:.3f}",
+            ]
+        )
+    command.extend(["-i", str(input_path)])
 
     if suffix == ".gif":
         gif_filter = _build_gif_filter(crop, transform, output_size, gif_colors)
@@ -133,6 +134,18 @@ def build_export_command(
                 str(output_path),
             ]
         )
+        return command
+
+    if suffix == ".png":
+        filters = _build_video_filters(crop, transform, output_size)
+        if filters:
+            command.extend(["-vf", ",".join(filters)])
+        command.append("-an")
+        if source_is_still_image:
+            command.extend(["-frames:v", "1"])
+        else:
+            command.extend(["-start_number", "1"])
+        command.append(str(output_path))
         return command
 
     filters = _build_video_filters(crop, transform, output_size)

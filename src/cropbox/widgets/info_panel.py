@@ -1,12 +1,13 @@
 from typing import Dict, Optional
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDockWidget,
     QFormLayout,
     QGroupBox,
     QLabel,
     QLineEdit,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -25,6 +26,7 @@ class InfoPanel(QDockWidget):
         layout.setContentsMargins(10, 10, 10, 10)
 
         self._fields: Dict[str, QLineEdit] = {}
+        self._metadata_labels: Dict[str, QLabel] = {}
         layout.addWidget(
             self._create_group(
                 "Playback",
@@ -68,11 +70,30 @@ class InfoPanel(QDockWidget):
                 ),
             )
         )
+        layout.addWidget(
+            self._create_metadata_group(
+                "Source",
+                (
+                    ("Type", "source_type"),
+                    ("Container", "source_container"),
+                    ("Video Codec", "source_video_codec"),
+                    ("Audio Codec", "source_audio_codec"),
+                    ("Duration", "source_duration"),
+                    ("Frame Rate", "source_frame_rate"),
+                ),
+            )
+        )
 
         self.source_size_label = QLabel("Source: -", content)
         layout.addWidget(self.source_size_label)
         layout.addStretch(1)
-        self.setWidget(content)
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setWidget(content)
+        self.setWidget(scroll)
         self.set_fields_enabled(False)
 
     def _create_group(self, title: str, rows) -> QGroupBox:
@@ -89,8 +110,24 @@ class InfoPanel(QDockWidget):
             form.addRow(label, field)
         return group
 
+    def _create_metadata_group(self, title: str, rows) -> QGroupBox:
+        group = QGroupBox(title, self)
+        form = QFormLayout(group)
+        for label, key in rows:
+            value_label = QLabel("-", group)
+            value_label.setWordWrap(True)
+            value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            self._metadata_labels[key] = value_label
+            form.addRow(label, value_label)
+        return group
+
     def set_fields_enabled(self, enabled: bool) -> None:
         for field in self._fields.values():
+            field.setEnabled(enabled)
+
+    def set_field_enabled(self, key: str, enabled: bool) -> None:
+        field = self._fields.get(key)
+        if field is not None:
             field.setEnabled(enabled)
 
     def set_values(self, values: Dict[str, str], force: bool = False) -> None:
@@ -112,3 +149,7 @@ class InfoPanel(QDockWidget):
         if field is None:
             return
         field.setStyleSheet("border: 1px solid #d65c5c;" if invalid else "")
+
+    def set_metadata(self, values: Dict[str, str]) -> None:
+        for key, label in self._metadata_labels.items():
+            label.setText(values.get(key, "-"))

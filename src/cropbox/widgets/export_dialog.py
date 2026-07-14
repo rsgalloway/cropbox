@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -28,10 +29,18 @@ class ExportOptions:
     crf: int
     gif_colors: int
     include_audio: bool
+    image_sequence_padding: Optional[int]
+    source_is_still_image: bool
 
 
 class ExportDialog(QDialog):
-    FORMAT_SUFFIXES = {"MP4": ".mp4", "MOV": ".mov", "GIF": ".gif"}
+    FORMAT_SUFFIXES = {
+        "MP4": ".mp4",
+        "MOV": ".mov",
+        "GIF": ".gif",
+        "PNG Sequence": ".png",
+        "PNG": ".png",
+    }
     SIZE_PRESETS: Dict[str, Optional[Tuple[int, int]]] = {
         "original": None,
         "2160p": (3840, 2160),
@@ -51,6 +60,7 @@ class ExportDialog(QDialog):
         source_path: Path,
         source_size: Tuple[int, int],
         has_audio: bool,
+        source_is_still_image: bool,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -61,6 +71,7 @@ class ExportDialog(QDialog):
         self._source_path = source_path
         self._source_size = source_size
         self._has_audio = has_audio
+        self._source_is_still_image = source_is_still_image
         self._settings = QSettings()
         self._options: Optional[ExportOptions] = None
 
@@ -72,8 +83,11 @@ class ExportDialog(QDialog):
         path_row.addWidget(browse_button)
 
         self.format_combo = QComboBox(self)
-        for name in self.FORMAT_SUFFIXES:
-            self.format_combo.addItem(name, name)
+        if self._source_is_still_image:
+            self.format_combo.addItem("PNG", "PNG")
+        else:
+            for name in ("MP4", "MOV", "GIF", "PNG Sequence"):
+                self.format_combo.addItem(name, name)
 
         self.size_combo = QComboBox(self)
         self.size_combo.addItem("Original", "original")
@@ -102,6 +116,9 @@ class ExportDialog(QDialog):
         self.quality_combo.addItem("Smaller file", "small")
 
         self.audio_checkbox = QCheckBox("Include source audio", self)
+        self.sequence_padding = QSpinBox(self)
+        self.sequence_padding.setRange(1, 12)
+        self.sequence_padding.setValue(8)
         self.output_dimensions_label = QLabel(self)
         self.output_dimensions_label.setWordWrap(True)
 
@@ -112,6 +129,7 @@ class ExportDialog(QDialog):
         form.addRow("Custom bounds", self.custom_widget)
         form.addRow("Quality", self.quality_combo)
         form.addRow("Audio", self.audio_checkbox)
+        form.addRow("Frame Padding", self.sequence_padding)
         form.addRow("Result", self.output_dimensions_label)
 
         hint = QLabel(
@@ -137,6 +155,7 @@ class ExportDialog(QDialog):
         self.size_combo.currentIndexChanged.connect(self._size_changed)
         self.custom_width.valueChanged.connect(self._update_dimensions)
         self.custom_height.valueChanged.connect(self._update_dimensions)
+        self.sequence_padding.valueChanged.connect(self._sequence_padding_changed)
         self._restore_settings()
         self._format_changed()
         self._size_changed()
@@ -145,10 +164,11 @@ class ExportDialog(QDialog):
         return self._options
 
     def _restore_settings(self) -> None:
-        format_name = str(self._settings.value("export/format", "MP4"))
+        default_format = "PNG" if self._source_is_still_image else "MP4"
+        format_name = str(self._settings.value("export/format", default_format))
         size_name = str(self._settings.value("export/size", "original"))
         quality_name = str(self._settings.value("export/quality", "balanced"))
-        include_audio = self._settings.value("export/include_audio", True, type=bool)
+        sequence_padding = int(self._settings.value("export/png_padding", 8))
         last_directory = Path(
             str(self._settings.value("export/last_directory", str(self._source_path.parent)))
         )
@@ -162,9 +182,11 @@ class ExportDialog(QDialog):
         self.custom_height.setValue(
             int(self._settings.value("export/custom_height", self._source_size[1]))
         )
-        self.audio_checkbox.setChecked(bool(include_audio) and self._has_audio)
-        suffix = self.FORMAT_SUFFIXES.get(format_name, ".mp4")
-        self.path_edit.setText(str(last_directory / f"{self._source_path.stem}_export{suffix}"))
+        self.sequence_padding.setValue(sequence_padding)
+        self.audio_checkbox.setChecked(self._has_audio)
+        self.path_edit.setText(
+            self._default_output_path(last_directory, str(self.format_combo.currentData()))
+        )
 
     def _set_combo_value(self, combo: QComboBox, value: str) -> None:
         index = combo.findData(value)
@@ -172,13 +194,16 @@ class ExportDialog(QDialog):
 
     def _format_changed(self) -> None:
         format_name = str(self.format_combo.currentData())
-        suffix = self.FORMAT_SUFFIXES[format_name]
-        current_path = Path(self.path_edit.text()) if self.path_edit.text() else self._source_path
-        self.path_edit.setText(str(current_path.with_suffix(suffix)))
-        audio_enabled = self._has_audio and format_name != "GIF"
+        if not self.path_edit.text():
+            current_directory = self._source_path.parent
+        else:
+            current_directory = Path(self.path_edit.text()).expanduser().parent
+        self.path_edit.setText(self._default_output_path(current_directory, format_name))
+        audio_enabled = self._has_audio and format_name not in {"GIF", "PNG Sequence", "PNG"}
         self.audio_checkbox.setEnabled(audio_enabled)
-        if not audio_enabled:
-            self.audio_checkbox.setChecked(False)
+        self.audio_checkbox.setChecked(audio_enabled)
+        self.sequence_padding.setEnabled(format_name == "PNG Sequence")
+        self.quality_combo.setEnabled(format_name != "PNG")
         self._update_dimensions()
 
     def _size_changed(self) -> None:
@@ -210,10 +235,14 @@ class ExportDialog(QDialog):
 
     def _update_dimensions(self) -> None:
         output_size = self._selected_output_size() or self._source_size
-        self.output_dimensions_label.setText(
+        format_name = str(self.format_combo.currentData())
+        result_text = (
             f"{output_size[0]} x {output_size[1]} from crop "
             f"{self._source_size[0]} x {self._source_size[1]}"
         )
+        if format_name == "PNG Sequence":
+            result_text += f" | frame files use %0{self.sequence_padding.value()}d padding"
+        self.output_dimensions_label.setText(result_text)
 
     def _browse(self) -> None:
         format_name = str(self.format_combo.currentData())
@@ -225,7 +254,37 @@ class ExportDialog(QDialog):
             f"{format_name} Files (*{suffix})",
         )
         if path:
-            self.path_edit.setText(str(Path(path).with_suffix(suffix)))
+            output_path = Path(path).with_suffix(suffix)
+            if format_name == "PNG Sequence":
+                self.path_edit.setText(
+                    self._sequence_path_for_padding(
+                        output_path.parent, self.sequence_padding.value()
+                    )
+                )
+            else:
+                self.path_edit.setText(str(output_path))
+
+    def _default_output_path(self, directory: Path, format_name: str) -> str:
+        if format_name == "PNG Sequence":
+            return self._sequence_path_for_padding(directory, self.sequence_padding.value())
+        suffix = self.FORMAT_SUFFIXES.get(format_name, ".mp4")
+        return str(directory / f"{self._source_path.stem}_export{suffix}")
+
+    def _sequence_path_for_padding(self, directory: Path, padding: int) -> str:
+        return str(directory / f"{self._source_path.stem}_export.%0{padding}d.png")
+
+    def _sequence_padding_changed(self) -> None:
+        if str(self.format_combo.currentData()) != "PNG Sequence":
+            self._update_dimensions()
+            return
+        text = self.path_edit.text().strip()
+        if text:
+            updated = re.sub(r"%0\d+d", f"%0{self.sequence_padding.value()}d", text)
+            if updated == text and text.endswith(".png"):
+                updated = str(Path(text).with_suffix(""))
+                updated += f".%0{self.sequence_padding.value()}d.png"
+            self.path_edit.setText(updated)
+        self._update_dimensions()
 
     def _accept(self) -> None:
         path_text = self.path_edit.text().strip()
@@ -234,7 +293,15 @@ class ExportDialog(QDialog):
             return
 
         format_name = str(self.format_combo.currentData())
-        output_path = Path(path_text).expanduser().with_suffix(self.FORMAT_SUFFIXES[format_name])
+        output_path = Path(path_text).expanduser()
+        if format_name == "PNG Sequence":
+            if "%" not in output_path.name:
+                output_path = output_path.with_suffix("")
+                output_path = output_path.parent / (
+                    output_path.name + f".%0{self.sequence_padding.value()}d.png"
+                )
+        else:
+            output_path = output_path.with_suffix(self.FORMAT_SUFFIXES[format_name])
         if not output_path.parent.exists():
             QMessageBox.warning(
                 self,
@@ -262,12 +329,17 @@ class ExportDialog(QDialog):
             crf=crf,
             gif_colors=gif_colors,
             include_audio=include_audio,
+            image_sequence_padding=(
+                self.sequence_padding.value() if format_name == "PNG Sequence" else None
+            ),
+            source_is_still_image=self._source_is_still_image,
         )
 
         self._settings.setValue("export/format", format_name)
         self._settings.setValue("export/size", self.size_combo.currentData())
         self._settings.setValue("export/quality", quality_name)
         self._settings.setValue("export/include_audio", include_audio)
+        self._settings.setValue("export/png_padding", self.sequence_padding.value())
         self._settings.setValue("export/last_directory", str(output_path.parent))
         self._settings.setValue("export/custom_width", self.custom_width.value())
         self._settings.setValue("export/custom_height", self.custom_height.value())

@@ -21,6 +21,7 @@ def _media_info(path: Path) -> MediaInfo:
         audio_codec="aac",
         container="mov,mp4",
         has_audio=True,
+        is_still_image=False,
     )
 
 
@@ -90,3 +91,49 @@ def test_export_media_returns_ffmpeg_failure_status(tmp_path: Path, monkeypatch)
     )
 
     assert export_media(input_path, tmp_path / "output.gif", 0.0, 5.0, None) == 7
+
+
+def test_export_media_allows_png_output(tmp_path: Path, monkeypatch) -> None:
+    input_path = tmp_path / "input.mp4"
+    input_path.touch()
+    output_path = tmp_path / "frames.%08d.png"
+    captured = {}
+
+    monkeypatch.setattr("cropbox.media.headless.missing_media_tools", lambda: [])
+    monkeypatch.setattr("cropbox.media.headless.probe_media", _media_info)
+
+    def fake_run(command):
+        captured["command"] = command
+        return CompletedProcess(command, 0)
+
+    monkeypatch.setattr("cropbox.media.headless.subprocess.run", fake_run)
+
+    result = export_media(input_path, output_path, 0.0, 1.0, None)
+
+    assert result == 0
+    assert captured["command"][-1] == str(output_path)
+
+
+def test_export_media_rejects_trim_for_still_images(tmp_path: Path, monkeypatch) -> None:
+    input_path = tmp_path / "input.png"
+    input_path.touch()
+
+    monkeypatch.setattr("cropbox.media.headless.missing_media_tools", lambda: [])
+    monkeypatch.setattr(
+        "cropbox.media.headless.probe_media",
+        lambda path: MediaInfo(
+            path=path,
+            duration=0.0,
+            width=1920,
+            height=1080,
+            frame_rate=None,
+            video_codec="png",
+            audio_codec=None,
+            container="png",
+            has_audio=False,
+            is_still_image=True,
+        ),
+    )
+
+    with pytest.raises(HeadlessExportError, match="still images"):
+        export_media(input_path, tmp_path / "output.png", 1.0, None, None)

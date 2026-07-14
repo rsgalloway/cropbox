@@ -12,7 +12,7 @@ from cropbox.models.crop_rect import CropRect
 
 
 LOGGER = logging.getLogger(__name__)
-SUPPORTED_OUTPUT_SUFFIXES = {".gif", ".mov", ".mp4"}
+SUPPORTED_OUTPUT_SUFFIXES = {".gif", ".mov", ".mp4", ".png"}
 
 
 class HeadlessExportError(RuntimeError):
@@ -53,15 +53,20 @@ def export_media(
     except ProbeError as exc:
         raise HeadlessExportError(f"Could not inspect input media: {exc}") from exc
 
-    resolved_end = media_info.duration if trim_end is None else trim_end
-    if resolved_end <= trim_start:
-        raise HeadlessExportError("Trim-out must be greater than trim-in")
-    if trim_start >= media_info.duration:
-        raise HeadlessExportError("Trim-in must be before the end of the media")
-    if resolved_end > media_info.duration:
-        raise HeadlessExportError(
-            f"Trim-out exceeds media duration ({media_info.duration:.3f} seconds)"
-        )
+    if media_info.is_still_image:
+        resolved_end = 0.0
+        if trim_start > 0.0 or (trim_end is not None and trim_end > 0.0):
+            raise HeadlessExportError("Trim settings are not supported for still images")
+    else:
+        resolved_end = media_info.duration if trim_end is None else trim_end
+        if resolved_end <= trim_start:
+            raise HeadlessExportError("Trim-out must be greater than trim-in")
+        if trim_start >= media_info.duration:
+            raise HeadlessExportError("Trim-in must be before the end of the media")
+        if resolved_end > media_info.duration:
+            raise HeadlessExportError(
+                f"Trim-out exceeds media duration ({media_info.duration:.3f} seconds)"
+            )
 
     if crop is not None and (
         crop.x + crop.width > media_info.width or crop.y + crop.height > media_info.height
@@ -77,6 +82,7 @@ def export_media(
         trim_end=resolved_end,
         crop=crop,
         has_audio=media_info.has_audio,
+        source_is_still_image=media_info.is_still_image,
     )
     LOGGER.info("Starting headless export: %s", " ".join(command))
     try:

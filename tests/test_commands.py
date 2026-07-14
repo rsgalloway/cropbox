@@ -163,3 +163,34 @@ def test_build_gif_export_adds_rotation_and_flip_before_palette() -> None:
         "[0:v]transpose=cclock,vflip,split[v0][v1];"
         "[v0]palettegen=max_colors=256[p];[v1][p]paletteuse[vout]" in command
     )
+
+
+def test_build_export_command_png_sequence_disables_audio_and_sets_start_number() -> None:
+    command = build_export_command(
+        input_path=Path("input.mp4"),
+        output_path=Path("frames.%08d.png"),
+        trim_start=0.0,
+        trim_end=2.0,
+        crop=None,
+        has_audio=True,
+    )
+
+    assert "-an" in command
+    assert "-start_number" in command
+    assert command[-1] == "frames.%08d.png"
+
+
+def test_build_export_command_png_still_writes_single_frame() -> None:
+    command = build_export_command(
+        input_path=Path("input.png"),
+        output_path=Path("output.png"),
+        trim_start=0.0,
+        trim_end=0.0,
+        crop=CropRect(x=10, y=20, width=200, height=100),
+        source_is_still_image=True,
+    )
+
+    assert "-ss" not in command
+    assert "-frames:v" in command
+    assert "crop=200:100:10:20" in command
+    assert command[-1] == "output.png"

@@ -22,7 +22,33 @@ def _parse_frame_rate(value: Optional[str]) -> Optional[float]:
     return float(value)
 
 
+def _probe_still_image(path: Path) -> Optional[MediaInfo]:
+    from PySide6.QtGui import QImageReader
+
+    reader = QImageReader(str(path))
+    if not reader.canRead():
+        return None
+    size = reader.size()
+    image_format = bytes(reader.format()).decode("ascii", errors="ignore").lower() or None
+    return MediaInfo(
+        path=path,
+        duration=0.0,
+        width=max(size.width(), 0),
+        height=max(size.height(), 0),
+        frame_rate=None,
+        video_codec=image_format,
+        audio_codec=None,
+        container=image_format,
+        has_audio=False,
+        is_still_image=True,
+    )
+
+
 def probe_media(path: Path) -> MediaInfo:
+    image_info = _probe_still_image(path)
+    if image_info is not None:
+        return image_info
+
     cmd = [
         "ffprobe",
         "-v",
@@ -69,4 +95,5 @@ def probe_media(path: Path) -> MediaInfo:
         audio_codec=audio_stream.get("codec_name") if audio_stream else None,
         container=container,
         has_audio=audio_stream is not None,
+        is_still_image=False,
     )

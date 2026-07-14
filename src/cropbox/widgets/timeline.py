@@ -1,7 +1,7 @@
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen
+from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
 
@@ -9,6 +9,7 @@ class TimelineWidget(QWidget):
     seekRequested = Signal(int)
     trimChanged = Signal(int, int)
     viewChanged = Signal(int, int)
+    thumbnailGeometryChanged = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -20,6 +21,7 @@ class TimelineWidget(QWidget):
         self._view_end_ms = 0
         self._fps: Optional[float] = None
         self._annotations_visible = True
+        self._show_frame_values = False
         self._position_ms = 0
         self._trim_in_ms = 0
         self._trim_out_ms = 0
@@ -28,6 +30,10 @@ class TimelineWidget(QWidget):
         self._view_drag_origin_x = 0.0
         self._view_drag_initial_range = (0, 0)
         self._pending_view_range: Optional[Tuple[int, int]] = None
+        self._thumbnail_job_id = 0
+        self._thumbnail_range = (0, 0)
+        self._thumbnail_positions: List[int] = []
+        self._thumbnails: List[Optional[QImage]] = []
 
     def set_frame_rate(self, fps: Optional[float]) -> None:
         self._fps = fps if fps and fps > 0 else None
@@ -35,6 +41,10 @@ class TimelineWidget(QWidget):
 
     def set_annotations_visible(self, visible: bool) -> None:
         self._annotations_visible = visible
+        self.update()
+
+    def set_show_frame_values(self, show_frames: bool) -> None:
+        self._show_frame_values = show_frames
         self.update()
 
     def set_duration(self, duration_ms: int) -> None:
@@ -81,8 +91,6 @@ class TimelineWidget(QWidget):
             start_ms < 0
             or end_ms > self._duration_ms
             or end_ms - start_ms < self._minimum_view_span_ms()
-            or start_ms > self._trim_in_ms
-            or end_ms < self._trim_out_ms
         ):
             return False
         self._view_start_ms = start_ms
@@ -105,6 +113,103 @@ class TimelineWidget(QWidget):
 
     def has_selected_trim_handle(self) -> bool:
         return self._selected_target in {"trim_in", "trim_out"}
+
+    def clear_thumbnails(self) -> None:
+        self._thumbnail_job_id = 0
+        self._thumbnail_range = (0, 0)
+        self._thumbnail_positions = []
+        self._thumbnails = []
+        self.update()
+
+    def set_thumbnail_request(
+        self,
+        job_id: int,
+        start_ms: int,
+        end_ms: int,
+        positions_ms: List[int],
+    ) -> None:
+        self._thumbnail_job_id = job_id
+        self._thumbnail_range = (start_ms, end_ms)
+        self._thumbnail_positions = list(positions_ms)
+        self._thumbnails = [None] * len(positions_ms)
+        self.update()
+
+    def set_thumbnail(
+        self,
+        job_id: int,
+        index: int,
+        position_ms: int,
+        image: QImage,
+    ) -> None:
+        if job_id != self._thumbnail_job_id:
+            return
+        if self._thumbnail_range != self.view_range():
+            return
+        if not (0 <= index < len(self._thumbnails)):
+            return
+        if self._thumbnail_positions[index] != position_ms:
+            return
+        self._thumbnails[index] = image
+        self.update()
+
+    def zoom_view(self, anchor_ms: int, zoom_in: bool) -> bool:
+        if self._duration_ms <= 0:
+            return False
+
+        current_start, current_end = self.view_range()
+        current_span = current_end - current_start
+        minimum_span = self._minimum_view_span_ms()
+        sync_trim_with_view = (current_start, current_end) == self.trim_range()
+        if current_span <= 0:
+            return False
+
+        zoom_factor = 0.85 if zoom_in else 1.15
+        target_span = int(round(current_span * zoom_factor))
+        target_span = max(minimum_span, min(target_span, self._duration_ms))
+        if target_span == current_span:
+            return False
+
+        anchor = max(current_start, min(anchor_ms, current_end))
+        if current_span <= 0:
+            anchor_ratio = 0.5
+        else:
+            anchor_ratio = (anchor - current_start) / float(current_span)
+
+        start_ms = int(round(anchor - (target_span * anchor_ratio)))
+        end_ms = start_ms + target_span
+
+        if start_ms < 0:
+            end_ms -= start_ms
+            start_ms = 0
+        if end_ms > self._duration_ms:
+            start_ms -= end_ms - self._duration_ms
+            end_ms = self._duration_ms
+
+        start_ms = min(start_ms, self._trim_in_ms)
+        end_ms = max(end_ms, self._trim_out_ms)
+
+        if end_ms - start_ms > self._duration_ms:
+            start_ms = 0
+            end_ms = self._duration_ms
+        else:
+            if start_ms < 0:
+                start_ms = 0
+            if end_ms > self._duration_ms:
+                end_ms = self._duration_ms
+
+        if end_ms - start_ms < minimum_span:
+            return False
+        if sync_trim_with_view:
+            self._view_start_ms = start_ms
+            self._view_end_ms = end_ms
+            self._trim_in_ms = start_ms
+            self._trim_out_ms = end_ms
+            self._position_ms = self._clamp_to_trim(self._position_ms)
+            self.viewChanged.emit(start_ms, end_ms)
+            self.trimChanged.emit(start_ms, end_ms)
+            self.update()
+            return True
+        return self.set_view_range(start_ms, end_ms)
 
     def nudge_selected_view_handle(self, delta_ms: int) -> bool:
         if self._duration_ms <= 0 or delta_ms == 0:
@@ -171,19 +276,33 @@ class TimelineWidget(QWidget):
 
     def _track_rect(self) -> QRectF:
         margin = 10.0
-        return QRectF(margin, 28.0, max(10.0, self.width() - (margin * 2.0)), 6.0)
+        top = 20.0
+        bottom_margin = 6.0
+        return QRectF(
+            margin,
+            top,
+            max(10.0, self.width() - (margin * 2.0)),
+            max(8.0, self.height() - top - bottom_margin),
+        )
+
+    def thumbnail_request_geometry(self) -> Tuple[int, int, int]:
+        track = self._track_rect()
+        thumb_height = max(8, int(track.height()))
+        thumb_width = max(12, int(round(thumb_height * 1.8)))
+        count = max(1, int(track.width() // max(thumb_width, 1)))
+        count = min(count, 48)
+        return thumb_width, thumb_height, count
 
     def _trim_label(self, value_ms: int) -> str:
+        if self._show_frame_values and self._fps is not None:
+            frame = max(0, int(round((value_ms / 1000.0) * self._fps)))
+            return f"x{frame}"
         total_ms = max(value_ms, 0)
         hours = total_ms // 3_600_000
         minutes = (total_ms % 3_600_000) // 60_000
         seconds = (total_ms % 60_000) // 1000
         millis = total_ms % 1000
-        time_text = f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
-        if self._fps is None:
-            return time_text
-        frame = max(0, int(round((value_ms / 1000.0) * self._fps)))
-        return f"{time_text}  x{frame}"
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{millis:03d}"
 
     def _clamp_to_trim(self, value_ms: int) -> int:
         return max(self._trim_in_ms, min(value_ms, self._trim_out_ms))
@@ -235,7 +354,7 @@ class TimelineWidget(QWidget):
         color: QColor,
     ) -> None:
         painter.setPen(QPen(color, 2))
-        painter.drawLine(int(x), int(track.top() - 5), int(x), int(track.bottom() + 5))
+        painter.drawLine(int(x), int(track.top()), int(x), int(track.bottom()))
         painter.setBrush(color)
         painter.setPen(Qt.NoPen)
         painter.drawEllipse(QPointF(x, track.center().y()), 4.0, 4.0)
@@ -246,7 +365,7 @@ class TimelineWidget(QWidget):
 
         track = self._track_rect()
         base_color = QColor("#2a2f38")
-        keep_color = QColor("#5b6472")
+        outside_trim_color = QColor(14, 18, 24, 128)
         playhead_color = QColor("#d6d9e0")
         handle_color = QColor("#f8d94a")
         selected_color = QColor("#fff4a3")
@@ -254,6 +373,7 @@ class TimelineWidget(QWidget):
         painter.setPen(Qt.NoPen)
         painter.setBrush(base_color)
         painter.drawRoundedRect(track, 3.0, 3.0)
+        self._draw_thumbnails(painter, track)
 
         in_visible = self._is_visible(self._trim_in_ms)
         out_visible = self._is_visible(self._trim_out_ms)
@@ -284,14 +404,24 @@ class TimelineWidget(QWidget):
         if visible_trim_start <= visible_trim_end:
             keep_left = self._x_from_ms(visible_trim_start)
             keep_right = self._x_from_ms(visible_trim_end)
-            keep_rect = QRectF(
-                keep_left,
+            left_dim_rect = QRectF(
+                track.left(),
                 track.top(),
-                max(2.0, keep_right - keep_left),
+                max(0.0, keep_left - track.left()),
                 track.height(),
             )
-            painter.setBrush(keep_color)
-            painter.drawRoundedRect(keep_rect, 3.0, 3.0)
+            right_dim_rect = QRectF(
+                keep_right,
+                track.top(),
+                max(0.0, track.right() - keep_right),
+                track.height(),
+            )
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(outside_trim_color)
+            if left_dim_rect.width() > 0:
+                painter.drawRect(left_dim_rect)
+            if right_dim_rect.width() > 0:
+                painter.drawRect(right_dim_rect)
 
         pending_start, pending_end = self._pending_view_range or self.view_range()
         viewport_handle_color = QColor("#4a535d")
@@ -329,9 +459,26 @@ class TimelineWidget(QWidget):
             if self._selected_target == "playhead":
                 playhead_color = selected_color
             painter.setPen(QPen(playhead_color, 2))
-            painter.drawLine(
-                int(play_x), int(track.top() - 8), int(play_x), int(track.bottom() + 8)
-            )
+            painter.drawLine(int(play_x), int(track.top()), int(play_x), int(track.bottom()))
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.thumbnailGeometryChanged.emit()
+
+    def _draw_thumbnails(self, painter: QPainter, track: QRectF) -> None:
+        if not self._thumbnails:
+            return
+
+        tile_count = len(self._thumbnails)
+        tile_width = track.width() / float(max(tile_count, 1))
+        for index, image in enumerate(self._thumbnails):
+            left = track.left() + (tile_width * index)
+            tile_rect = QRectF(left, track.top(), tile_width, track.height())
+            if image is None or image.isNull():
+                shade = QColor("#313743" if index % 2 == 0 else "#363d49")
+                painter.fillRect(tile_rect, shade)
+                continue
+            painter.drawImage(tile_rect, image)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if self._duration_ms <= 0:
@@ -343,9 +490,9 @@ class TimelineWidget(QWidget):
         view_end_x = track.right()
         viewport_hit_rect = QRectF(
             track.left(),
-            track.center().y() - 3.0,
+            track.top(),
             track.width(),
-            (track.bottom() + 8.0) - (track.center().y() - 3.0),
+            track.height(),
         )
         if viewport_hit_rect.contains(point):
             start_distance = self._distance_to_handle(point, view_start_x)
@@ -455,3 +602,15 @@ class TimelineWidget(QWidget):
                 self.set_view_range(*pending_view_range)
             else:
                 self.update()
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        angle_delta = event.angleDelta().y()
+        if angle_delta == 0 or self._duration_ms <= 0:
+            event.ignore()
+            return
+
+        anchor_ms = self._ms_from_x(event.position().x())
+        if self.zoom_view(anchor_ms, zoom_in=angle_delta > 0):
+            event.accept()
+            return
+        event.ignore()

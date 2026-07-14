@@ -14,3 +14,4 @@ class MediaInfo:
     audio_codec: Optional[str]
     container: Optional[str]
     has_audio: bool
+    is_still_image: bool = False

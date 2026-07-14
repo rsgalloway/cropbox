@@ -6,6 +6,7 @@ from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
 from cropbox import __version__
+from cropbox.__main__ import InitialPosition
 from cropbox.logging_utils import configure_logging
 from cropbox.models.crop_rect import CropRect
 from cropbox.models.trim_range import TrimRange
@@ -16,6 +17,7 @@ def main(
     initial_media: Optional[str] = None,
     initial_trim: Optional[TrimRange] = None,
     initial_crop: Optional[CropRect] = None,
+    initial_position: Optional[InitialPosition] = None,
 ) -> int:
     configure_logging()
     app = QApplication(sys.argv)
@@ -29,6 +31,7 @@ def main(
         initial_media_path=initial_path,
         initial_trim=initial_trim,
         initial_crop=initial_crop,
+        initial_position=initial_position,
     )
     window.show()
     return app.exec()

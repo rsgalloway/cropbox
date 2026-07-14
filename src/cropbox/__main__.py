@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -10,6 +11,12 @@ from cropbox.models.trim_range import TrimRange
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class InitialPosition:
+    time_seconds: Optional[float] = None
+    frame: Optional[int] = None
 
 
 def _parse_time_value(value: str) -> float:
@@ -62,6 +69,18 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         help="Initial crop rectangle in source pixels",
     )
+    position_group = parser.add_mutually_exclusive_group()
+    position_group.add_argument(
+        "--current-time",
+        dest="current_time",
+        help="Initial current time in seconds or HH:MM:SS.mmm format",
+    )
+    position_group.add_argument(
+        "--current-frame",
+        dest="current_frame",
+        type=int,
+        help="Initial current frame number",
+    )
     return parser
 
 
@@ -97,19 +116,49 @@ def _build_initial_crop(
     return CropRect(x=x, y=y, width=width, height=height)
 
 
+def _build_initial_position(
+    args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> Optional[InitialPosition]:
+    if args.current_time is None and args.current_frame is None:
+        return None
+
+    if args.current_time is not None:
+        try:
+            return InitialPosition(time_seconds=_parse_time_value(args.current_time))
+        except ValueError as exc:
+            parser.error(str(exc))
+            return None
+
+    if args.current_frame < 0:
+        parser.error("current frame must be zero or greater")
+        return None
+    return InitialPosition(frame=args.current_frame)
+
+
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
     if args.media is None and (
-        args.out is not None or args.trim_in is not None or args.trim_out is not None or args.crop
+        args.out is not None
+        or args.trim_in is not None
+        or args.trim_out is not None
+        or args.crop
+        or args.current_time is not None
+        or args.current_frame is not None
     ):
-        parser.error("media path is required when using --out, --trim-in, --trim-out, or --crop")
+        parser.error(
+            "media path is required when using --out, --trim-in, --trim-out, --crop, "
+            "--current-time, or --current-frame"
+        )
     if args.force and args.out is None:
         parser.error("--force can only be used with --out")
 
     initial_trim = _build_initial_trim(args, parser)
     initial_crop = _build_initial_crop(args, parser)
+    initial_position = _build_initial_position(args, parser)
     if args.out is not None:
+        if initial_position is not None:
+            parser.error("--current-time and --current-frame are only supported for UI launch")
         from cropbox.logging_utils import configure_logging
         from cropbox.media.headless import HeadlessExportError, export_media
 
@@ -135,6 +184,7 @@ def main() -> int:
         initial_media=args.media,
         initial_trim=initial_trim,
         initial_crop=initial_crop,
+        initial_position=initial_position,
     )
 
 
