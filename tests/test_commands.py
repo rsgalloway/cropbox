@@ -2,6 +2,7 @@ from pathlib import Path
 
 from cropbox.media.commands import build_export_command
 from cropbox.models.crop_rect import CropRect
+from cropbox.models.transform import TransformState
 
 
 def test_build_export_command_with_crop_mp4() -> None:
@@ -103,7 +104,7 @@ def test_build_export_command_adds_scale_quality_and_disables_audio() -> None:
         crf=18,
     )
 
-    assert "crop=1920:1080:10:20,scale=1280:720:flags=lanczos" in command
+    assert "crop=1920:1080:10:20,scale=1280:720:flags=lanczos,setsar=1" in command
     assert command[command.index("-crf") + 1] == "18"
     assert "-an" in command
     assert "-c:a" not in command
@@ -121,6 +122,44 @@ def test_build_export_command_gif_adds_scale_and_palette_colors() -> None:
     )
 
     assert (
-        "[0:v]scale=640:360:flags=lanczos,split[v0][v1];"
+        "[0:v]scale=640:360:flags=lanczos,setsar=1,split[v0][v1];"
         "[v0]palettegen=max_colors=64[p];[v1][p]paletteuse[vout]" in command
+    )
+
+
+def test_build_export_command_adds_edit_transforms_in_pipeline_order() -> None:
+    command = build_export_command(
+        input_path=Path("input.mp4"),
+        output_path=Path("output.mp4"),
+        trim_start=0.0,
+        trim_end=2.0,
+        crop=CropRect(x=10, y=20, width=800, height=600),
+        transform=TransformState(
+            rotation=90,
+            flip_horizontal=True,
+            resize_width=640,
+            resize_height=480,
+        ),
+        output_size=(320, 240),
+    )
+
+    assert (
+        "crop=800:600:10:20,scale=640:480:flags=lanczos,"
+        "transpose=clock,hflip,scale=320:240:flags=lanczos,setsar=1" in command
+    )
+
+
+def test_build_gif_export_adds_rotation_and_flip_before_palette() -> None:
+    command = build_export_command(
+        input_path=Path("input.mp4"),
+        output_path=Path("output.gif"),
+        trim_start=0.0,
+        trim_end=2.0,
+        crop=None,
+        transform=TransformState(rotation=270, flip_vertical=True),
+    )
+
+    assert (
+        "[0:v]transpose=cclock,vflip,split[v0][v1];"
+        "[v0]palettegen=max_colors=256[p];[v1][p]paletteuse[vout]" in command
     )

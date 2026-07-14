@@ -9,6 +9,7 @@ A lightweight desktop utility for trimming, cropping, previewing, and exporting 
 - MP4, MOV, MKV, WebM, and GIF preview
 - Interactive crop overlay with draggable edges and handles
 - Ctrl-drag crop handles to preserve the crop aspect ratio
+- Live resize, 90° rotation, and horizontal/vertical flip previews
 - Toggleable crop-coordinate and trim time/frame annotations
 - Timeline trim in/out selection
 - Exact timeline viewport start/end for precision trimming
@@ -45,11 +46,17 @@ sudo apt install ffmpeg
 - Left/Right: step one frame
 - Shift+Left/Right: nudge selected trim handle by one frame
 - Ctrl+Left/Right: nudge selected timeline viewport handle by one frame
+- Ctrl+Shift+D: open Resize
+- Ctrl+Shift+L/R: rotate left/right 90°
+- Ctrl+Shift+U: rotate 180° (upside down)
+- Ctrl+Shift+H/V: toggle horizontal/vertical flip
+- Ctrl+Shift+0: reset transforms
 
 ## Menus
 
 - File: Open, Export, Quit
 - Edit: Set Trim In, Set Trim Out, Reset Trim, Reset Timeline, Create Crop, Reset Crop, Playback Speed, Loop Playback
+- Transform: Resize, Rotate Left/Right/180°, Flip Horizontal/Vertical, Reset Transform
 - View: Info Panel, Show Annotations
 - Help: Install FFmpeg, About Cropbox
 
@@ -108,6 +115,8 @@ cropbox input.mp4 --out output.mp4 --trim-in 12.5 --trim-out 20 --crop 100 50 12
 ## Notes
 
 - Playback speed affects both preview and export.
+- Resize, rotation, and flip transforms are previewed live and applied to MP4, MOV, and GIF exports.
+- Edit-stage resize is applied after crop; export size presets can optionally resize the transformed result again.
 - Headless export defaults to the full media duration when `--trim-out` is omitted.
 - Export size presets preserve the cropped aspect ratio and report the resulting dimensions.
 - High, Balanced, and Smaller File presets control H.264 quality or GIF palette size.

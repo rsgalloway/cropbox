@@ -10,6 +10,7 @@ from cropbox.models.crop_rect import CropRect
 
 class CropOverlay(QWidget):
     cropChanged = Signal(int, int, int, int)
+    cropEditFinished = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -18,6 +19,7 @@ class CropOverlay(QWidget):
 
         self._source_width = 0
         self._source_height = 0
+        self._display_aspect_ratio: Optional[float] = None
         self._crop: Optional[CropRect] = None
         self._annotations_visible = True
         self._drag_mode: Optional[str] = None
@@ -39,6 +41,10 @@ class CropOverlay(QWidget):
         self._crop = crop
         self.update()
 
+    def set_display_aspect_ratio(self, aspect_ratio: Optional[float]) -> None:
+        self._display_aspect_ratio = aspect_ratio if aspect_ratio and aspect_ratio > 0 else None
+        self.update()
+
     def crop_rect(self) -> Optional[CropRect]:
         return self._crop
 
@@ -52,7 +58,9 @@ class CropOverlay(QWidget):
 
         widget_w = float(max(1, self.width()))
         widget_h = float(max(1, self.height()))
-        source_ratio = float(self._source_width) / float(self._source_height)
+        source_ratio = self._display_aspect_ratio or (
+            float(self._source_width) / float(self._source_height)
+        )
         view_ratio = widget_w / widget_h
 
         if source_ratio >= view_ratio:
@@ -516,6 +524,9 @@ class CropOverlay(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, _event: QMouseEvent) -> None:
+        was_dragging = self._drag_mode is not None
         self._drag_mode = None
         self._drag_aspect_ratio = None
         self.setCursor(Qt.ArrowCursor)
+        if was_dragging:
+            self.cropEditFinished.emit()

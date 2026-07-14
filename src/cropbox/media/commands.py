@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from cropbox.models.crop_rect import CropRect
+from cropbox.models.transform import TransformState
 
 
 def _build_crop_filter(crop: CropRect) -> str:
@@ -19,18 +20,59 @@ def _build_scale_filter(output_size: Tuple[int, int]) -> str:
 
 def _build_gif_filter(
     crop: Optional[CropRect],
+    transform: Optional[TransformState],
     output_size: Optional[Tuple[int, int]],
     colors: int,
 ) -> str:
     video_chain = "[0:v]"
-    if crop is not None:
-        video_chain += _build_crop_filter(crop)
-        video_chain += ","
-    if output_size is not None:
-        video_chain += _build_scale_filter(output_size)
+    filters = _build_video_filters(crop, transform, output_size)
+    if filters:
+        video_chain += ",".join(filters)
         video_chain += ","
     video_chain += f"split[v0][v1];[v0]palettegen=max_colors={colors}[p];" "[v1][p]paletteuse[vout]"
     return video_chain
+
+
+def _build_transform_filters(transform: Optional[TransformState]) -> List[str]:
+    if transform is None:
+        return []
+
+    filters: List[str] = []
+    if transform.resize_width is not None and transform.resize_height is not None:
+        filters.append(_build_scale_filter((transform.resize_width, transform.resize_height)))
+
+    rotation = transform.normalized_rotation()
+    if rotation == 90:
+        filters.append("transpose=clock")
+    elif rotation == 180:
+        filters.extend(["hflip", "vflip"])
+    elif rotation == 270:
+        filters.append("transpose=cclock")
+
+    if transform.flip_horizontal:
+        filters.append("hflip")
+    if transform.flip_vertical:
+        filters.append("vflip")
+    return filters
+
+
+def _build_video_filters(
+    crop: Optional[CropRect],
+    transform: Optional[TransformState],
+    output_size: Optional[Tuple[int, int]],
+) -> List[str]:
+    filters: List[str] = []
+    if crop is not None:
+        filters.append(_build_crop_filter(crop))
+    filters.extend(_build_transform_filters(transform))
+    if output_size is not None:
+        filters.append(_build_scale_filter(output_size))
+    has_edit_resize = bool(
+        transform and transform.resize_width is not None and transform.resize_height is not None
+    )
+    if has_edit_resize or output_size is not None:
+        filters.append("setsar=1")
+    return filters
 
 
 def _build_atempo_filters(playback_rate: float) -> List[str]:
@@ -60,6 +102,7 @@ def build_export_command(
     output_size: Optional[Tuple[int, int]] = None,
     crf: int = 23,
     gif_colors: int = 256,
+    transform: Optional[TransformState] = None,
 ) -> List[str]:
     suffix = output_path.suffix.lower()
     command: List[str] = [
@@ -75,7 +118,7 @@ def build_export_command(
     ]
 
     if suffix == ".gif":
-        gif_filter = _build_gif_filter(crop, output_size, gif_colors)
+        gif_filter = _build_gif_filter(crop, transform, output_size, gif_colors)
         if playback_rate != 1.0:
             gif_filter = gif_filter.replace("[0:v]", f"[0:v]setpts=PTS/{playback_rate:.3f},", 1)
         command.extend(
@@ -92,11 +135,7 @@ def build_export_command(
         )
         return command
 
-    filters = []
-    if crop is not None:
-        filters.append(_build_crop_filter(crop))
-    if output_size is not None:
-        filters.append(_build_scale_filter(output_size))
+    filters = _build_video_filters(crop, transform, output_size)
     if playback_rate != 1.0:
         filters.append(f"setpts=PTS/{playback_rate:.3f}")
 

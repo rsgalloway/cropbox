@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import QEvent, QSize, Qt, QUrl
+from PySide6.QtCore import QEvent, QSignalBlocker, QSize, Qt, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QImage, QKeySequence, QMovie, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame, QVideoSink
 from PySide6.QtWidgets import (
@@ -29,10 +29,12 @@ from cropbox.media.probe import ProbeError, probe_media
 from cropbox.models.crop_rect import CropRect
 from cropbox.models.edit_session import EditSession
 from cropbox.models.trim_range import TrimRange
+from cropbox.models.transform import TransformState
 from cropbox.widgets.crop_overlay import CropOverlay
 from cropbox.widgets.export_dialog import ExportDialog
 from cropbox.widgets.info_panel import InfoPanel
 from cropbox.widgets.player_widget import PlayerWidget
+from cropbox.widgets.resize_dialog import ResizeDialog
 from cropbox.widgets.timeline import TimelineWidget
 
 
@@ -271,6 +273,7 @@ class MainWindow(QMainWindow):
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("File")
         edit_menu = self.menuBar().addMenu("Edit")
+        self.transform_menu = self.menuBar().addMenu("Transform")
         view_menu = self.menuBar().addMenu("View")
         help_menu = self.menuBar().addMenu("Help")
         playback_speed_menu = QMenu("Playback Speed", self)
@@ -304,6 +307,30 @@ class MainWindow(QMainWindow):
 
         self.reset_crop_action = QAction("Reset Crop", self)
         self.reset_crop_action.triggered.connect(self.reset_crop)
+
+        self.resize_action = QAction("Resize...", self)
+        self.resize_action.setShortcut(QKeySequence("Ctrl+Shift+D"))
+        self.resize_action.triggered.connect(self.show_resize_dialog)
+        self.rotate_left_action = QAction("Rotate Left 90°", self)
+        self.rotate_left_action.setShortcut(QKeySequence("Ctrl+Shift+L"))
+        self.rotate_left_action.triggered.connect(lambda: self.rotate(-90))
+        self.rotate_right_action = QAction("Rotate Right 90°", self)
+        self.rotate_right_action.setShortcut(QKeySequence("Ctrl+Shift+R"))
+        self.rotate_right_action.triggered.connect(lambda: self.rotate(90))
+        self.rotate_180_action = QAction("Rotate 180°", self)
+        self.rotate_180_action.setShortcut(QKeySequence("Ctrl+Shift+U"))
+        self.rotate_180_action.triggered.connect(lambda: self.rotate(180))
+        self.flip_horizontal_action = QAction("Flip Horizontal", self)
+        self.flip_horizontal_action.setShortcut(QKeySequence("Ctrl+Shift+H"))
+        self.flip_horizontal_action.setCheckable(True)
+        self.flip_horizontal_action.toggled.connect(self.set_flip_horizontal)
+        self.flip_vertical_action = QAction("Flip Vertical", self)
+        self.flip_vertical_action.setShortcut(QKeySequence("Ctrl+Shift+V"))
+        self.flip_vertical_action.setCheckable(True)
+        self.flip_vertical_action.toggled.connect(self.set_flip_vertical)
+        self.reset_transform_action = QAction("Reset Transform", self)
+        self.reset_transform_action.setShortcut(QKeySequence("Ctrl+Shift+0"))
+        self.reset_transform_action.triggered.connect(self.reset_transform)
 
         self.loop_playback_action = QAction("Loop Playback", self)
         self.loop_playback_action.setCheckable(True)
@@ -355,6 +382,17 @@ class MainWindow(QMainWindow):
         edit_menu.addSeparator()
         edit_menu.addAction(self.loop_playback_action)
 
+        self.transform_menu.addAction(self.resize_action)
+        self.transform_menu.addSeparator()
+        self.transform_menu.addAction(self.rotate_left_action)
+        self.transform_menu.addAction(self.rotate_right_action)
+        self.transform_menu.addAction(self.rotate_180_action)
+        self.transform_menu.addSeparator()
+        self.transform_menu.addAction(self.flip_horizontal_action)
+        self.transform_menu.addAction(self.flip_vertical_action)
+        self.transform_menu.addSeparator()
+        self.transform_menu.addAction(self.reset_transform_action)
+
         view_menu.addAction(self.show_metadata_action)
         view_menu.addAction(self.show_annotations_action)
 
@@ -393,6 +431,7 @@ class MainWindow(QMainWindow):
         self.timeline_widget.trimChanged.connect(self._timeline_trim_changed)
         self.timeline_widget.viewChanged.connect(lambda _start, _end: self._refresh_metadata())
         self.crop_overlay.cropChanged.connect(self._overlay_crop_changed)
+        self.crop_overlay.cropEditFinished.connect(self._sync_transform_preview)
         self.video_container.customContextMenuRequested.connect(self._show_video_context_menu)
         self._video_sink.videoFrameChanged.connect(self._on_video_frame_changed)
         self.info_panel.valueSubmitted.connect(self._apply_info_value)
@@ -414,6 +453,13 @@ class MainWindow(QMainWindow):
         self.reset_timeline_action.setEnabled(enabled)
         self.create_crop_action.setEnabled(enabled)
         self.reset_crop_action.setEnabled(enabled)
+        self.resize_action.setEnabled(enabled)
+        self.rotate_left_action.setEnabled(enabled)
+        self.rotate_right_action.setEnabled(enabled)
+        self.rotate_180_action.setEnabled(enabled)
+        self.flip_horizontal_action.setEnabled(enabled)
+        self.flip_vertical_action.setEnabled(enabled)
+        self.reset_transform_action.setEnabled(enabled)
         self.loop_playback_action.setEnabled(enabled)
         self.mute_button.setEnabled(
             enabled and bool(self._session and self._session.media.has_audio)
@@ -561,6 +607,7 @@ class MainWindow(QMainWindow):
             crop=CropRect(x=0, y=0, width=media_info.width, height=media_info.height),
             trim=trim,
         )
+        self._sync_transform_actions()
         self._apply_initial_edit_options()
         self._fps = media_info.frame_rate
         self._duration_ms = max(int(media_info.duration * 1000), 0)
@@ -574,8 +621,7 @@ class MainWindow(QMainWindow):
         self.timeline_widget.set_trim_range(trim_in_ms, trim_out_ms)
         self.timeline_widget.set_position(trim_in_ms)
 
-        self.crop_overlay.set_source_size(media_info.width, media_info.height)
-        self.crop_overlay.set_crop_rect(self._session.crop)
+        self._sync_transform_preview()
         self.crop_overlay.show()
         self.video_widget.clear()
 
@@ -641,7 +687,7 @@ class MainWindow(QMainWindow):
         )
         dialog = ExportDialog(
             source_path=self._session.media.path,
-            source_size=(crop.width, crop.height),
+            source_size=self._session.transform.output_size(crop.width, crop.height),
             has_audio=self._session.media.has_audio,
             parent=self,
         )
@@ -663,6 +709,7 @@ class MainWindow(QMainWindow):
             output_size=options.output_size,
             crf=options.crf,
             gif_colors=options.gif_colors,
+            transform=self._session.transform,
         )
         self._exporter.start(command, options.output_path)
 
@@ -690,7 +737,7 @@ class MainWindow(QMainWindow):
             width=self._session.media.width,
             height=self._session.media.height,
         )
-        self.crop_overlay.set_crop_rect(self._session.crop)
+        self._sync_transform_preview()
         self._refresh_metadata()
 
     def create_crop(self) -> None:
@@ -709,9 +756,71 @@ class MainWindow(QMainWindow):
             width=crop_width,
             height=crop_height,
         )
-        self.crop_overlay.set_crop_rect(self._session.crop)
+        self._sync_transform_preview()
         self.crop_overlay.show()
         self._refresh_metadata()
+
+    def show_resize_dialog(self) -> None:
+        if self._session is None or self._session.crop is None:
+            return
+        transform = self._session.transform
+        current_size = (
+            (transform.resize_width, transform.resize_height)
+            if transform.resize_width is not None and transform.resize_height is not None
+            else None
+        )
+        dialog = ResizeDialog(
+            source_size=(self._session.crop.width, self._session.crop.height),
+            current_size=current_size,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        result = dialog.result_size()
+        if result is None:
+            transform.resize_width = None
+            transform.resize_height = None
+        else:
+            transform.resize_width, transform.resize_height = result
+        self._transform_changed()
+
+    def rotate(self, degrees: int) -> None:
+        if self._session is None:
+            return
+        self._session.transform.rotation = (self._session.transform.rotation + degrees) % 360
+        self._transform_changed()
+
+    def set_flip_horizontal(self, enabled: bool) -> None:
+        if self._session is None:
+            return
+        self._session.transform.flip_horizontal = enabled
+        self._transform_changed()
+
+    def set_flip_vertical(self, enabled: bool) -> None:
+        if self._session is None:
+            return
+        self._session.transform.flip_vertical = enabled
+        self._transform_changed()
+
+    def reset_transform(self) -> None:
+        if self._session is None:
+            return
+        self._session.transform = TransformState()
+        self._sync_transform_actions()
+        self._transform_changed()
+
+    def _transform_changed(self) -> None:
+        self._sync_transform_actions()
+        self._sync_transform_preview()
+        self._refresh_metadata(force=True)
+
+    def _sync_transform_actions(self) -> None:
+        horizontal = bool(self._session and self._session.transform.flip_horizontal)
+        vertical = bool(self._session and self._session.transform.flip_vertical)
+        with QSignalBlocker(self.flip_horizontal_action):
+            self.flip_horizontal_action.setChecked(horizontal)
+        with QSignalBlocker(self.flip_vertical_action):
+            self.flip_vertical_action.setChecked(vertical)
 
     def _set_loop_playback(self, enabled: bool) -> None:
         self._loop_playback = enabled
@@ -886,7 +995,13 @@ class MainWindow(QMainWindow):
     def _overlay_crop_changed(self, x: int, y: int, width: int, height: int) -> None:
         if self._session is None:
             return
-        self._session.crop = CropRect(x=x, y=y, width=width, height=height)
+        media = self._session.media
+        transformed_crop = CropRect(x=x, y=y, width=width, height=height)
+        self._session.crop = self._session.transform.unmap_rect(
+            transformed_crop,
+            media.width,
+            media.height,
+        )
         self._refresh_metadata()
 
     def _show_video_context_menu(self, pos) -> None:
@@ -939,6 +1054,31 @@ class MainWindow(QMainWindow):
         self.video_widget.setGeometry(frame_rect)
         self.crop_overlay.setGeometry(frame_rect)
         self.crop_overlay.raise_()
+
+    def _sync_transform_preview(self) -> None:
+        if self._session is None or self._session.crop is None:
+            self.video_widget.set_transform(0, False, False, None)
+            return
+
+        media = self._session.media
+        crop = self._session.crop
+        transform = self._session.transform
+        logical_width, logical_height = transform.rotated_size(media.width, media.height)
+        canvas_width, canvas_height = transform.preview_canvas_size(
+            media.width,
+            media.height,
+            crop,
+        )
+        canvas_aspect = canvas_width / float(max(canvas_height, 1.0))
+        self.video_widget.set_transform(
+            transform.normalized_rotation(),
+            transform.flip_horizontal,
+            transform.flip_vertical,
+            canvas_aspect,
+        )
+        self.crop_overlay.set_source_size(logical_width, logical_height)
+        self.crop_overlay.set_display_aspect_ratio(canvas_aspect)
+        self.crop_overlay.set_crop_rect(transform.map_rect(crop, media.width, media.height))
 
     def _set_annotations_visible(self, visible: bool) -> None:
         self.crop_overlay.set_annotations_visible(visible)
@@ -1041,7 +1181,7 @@ class MainWindow(QMainWindow):
 
         crop = CropRect(x=x, y=y, width=width, height=height)
         self._session.crop = crop
-        self.crop_overlay.set_crop_rect(crop)
+        self._sync_transform_preview()
         self.crop_overlay.show()
         return True
 
@@ -1062,6 +1202,15 @@ class MainWindow(QMainWindow):
         trim_in_ms, trim_out_ms = self.timeline_widget.trim_range()
         timeline_start_ms, timeline_end_ms = self.timeline_widget.view_range()
         crop = self._session.crop
+        output_crop = crop or CropRect(
+            0,
+            0,
+            self._session.media.width,
+            self._session.media.height,
+        )
+        output_width, output_height = self._session.transform.output_size(
+            output_crop.width, output_crop.height
+        )
         current_ms = self.timeline_widget.position()
         values = {
             "current_time": _format_time(current_ms / 1000.0),
@@ -1084,7 +1233,8 @@ class MainWindow(QMainWindow):
         }
         self.info_panel.set_fields_enabled(True)
         self.info_panel.source_size_label.setText(
-            f"Source: {self._session.media.width} x {self._session.media.height}"
+            f"Source: {self._session.media.width} x {self._session.media.height} | "
+            f"Output: {output_width} x {output_height}"
         )
         self.info_panel.set_values(values, force=force)
 
