@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from cropbox import __version__
 from cropbox.models.crop_rect import CropRect
 from cropbox.models.trim_range import TrimRange
 
@@ -39,12 +40,17 @@ def _parse_time_value(value: str) -> float:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cropbox")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
     parser.add_argument("media", nargs="?", help="Optional media path to open on launch")
     parser.add_argument(
         "-o",
         "--out",
         type=Path,
-        help="Export directly to MP4, MOV, or GIF without opening the UI",
+        help="Export directly to MP4, MOV, GIF, or PNG without opening the UI",
     )
     parser.add_argument(
         "-f",

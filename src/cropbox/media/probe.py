@@ -5,6 +5,8 @@ from typing import Any, Dict, Optional
 
 from cropbox.models.media_info import MediaInfo
 
+ANIMATED_IMAGE_SUFFIXES = {".gif"}
+
 
 class ProbeError(RuntimeError):
     pass
@@ -45,9 +47,10 @@ def _probe_still_image(path: Path) -> Optional[MediaInfo]:
 
 
 def probe_media(path: Path) -> MediaInfo:
-    image_info = _probe_still_image(path)
-    if image_info is not None:
-        return image_info
+    if path.suffix.lower() not in ANIMATED_IMAGE_SUFFIXES:
+        image_info = _probe_still_image(path)
+        if image_info is not None:
+            return image_info
 
     cmd = [
         "ffprobe",

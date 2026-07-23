@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
+import pytest
+
+from cropbox import __version__
 from cropbox.__main__ import (
     _build_initial_position,
     _build_initial_crop,
@@ -62,3 +65,14 @@ def test_build_initial_position_from_frame_args() -> None:
     position = _build_initial_position(args, parser)
 
     assert position == InitialPosition(frame=42)
+
+
+def test_parser_version_flag_prints_version(capsys) -> None:
+    parser = _build_parser()
+
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(["--version"])
+
+    assert exc_info.value.code == 0
+    captured = capsys.readouterr()
+    assert captured.out.strip() == f"cropbox {__version__}"

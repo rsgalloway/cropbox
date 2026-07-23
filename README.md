@@ -2,11 +2,14 @@
 
 A lightweight desktop utility for trimming, cropping, previewing, and exporting video, GIF, and still-image media.
 
+Current release: `0.2.1`
+
 ![CropBox screenshot](cropbox.png)
 
 ## Features
 
 - MP4, MOV, MKV, WebM, GIF, PNG, JPEG, WebP, and other Qt-readable still-image preview
+- Animated GIF playback with trim, frame stepping, and export to MP4, MOV, GIF, and PNG sequences
 - Interactive crop overlay with draggable edges and handles
 - Ctrl-drag crop handles to preserve the crop aspect ratio
 - Live resize, 90° rotation, and horizontal/vertical flip previews
@@ -123,6 +126,7 @@ cropbox input.mp4 --out output.mp4 --trim-in 12.5 --trim-out 20 --crop 100 50 12
 
 ## Notes
 
+- Version `0.2.1` fixes GIF probing so animated GIFs open on the timed-media path instead of the still-image path.
 - Playback speed affects both preview and export for timed media.
 - Resize, rotation, and flip transforms are previewed live and applied to MP4, MOV, GIF, and PNG exports.
 - Edit-stage resize is applied after crop; export size presets can optionally resize the transformed result again.

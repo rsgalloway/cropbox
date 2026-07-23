@@ -157,11 +157,24 @@ class TimelineWidget(QWidget):
             return False
 
         current_start, current_end = self.view_range()
+        trim_start, trim_end = self.trim_range()
         current_span = current_end - current_start
         minimum_span = self._minimum_view_span_ms()
         sync_trim_with_view = (current_start, current_end) == self.trim_range()
         if current_span <= 0:
             return False
+
+        trim_span = trim_end - trim_start
+        if (
+            zoom_in
+            and trim_span >= minimum_span
+            and trim_span < current_span
+            and current_start <= trim_start
+            and current_end >= trim_end
+        ):
+            current_start = trim_start
+            current_end = trim_end
+            current_span = trim_span
 
         zoom_factor = 0.85 if zoom_in else 1.15
         target_span = int(round(current_span * zoom_factor))
@@ -184,18 +197,6 @@ class TimelineWidget(QWidget):
         if end_ms > self._duration_ms:
             start_ms -= end_ms - self._duration_ms
             end_ms = self._duration_ms
-
-        start_ms = min(start_ms, self._trim_in_ms)
-        end_ms = max(end_ms, self._trim_out_ms)
-
-        if end_ms - start_ms > self._duration_ms:
-            start_ms = 0
-            end_ms = self._duration_ms
-        else:
-            if start_ms < 0:
-                start_ms = 0
-            if end_ms > self._duration_ms:
-                end_ms = self._duration_ms
 
         if end_ms - start_ms < minimum_span:
             return False

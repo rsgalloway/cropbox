@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cropbox"
-version = "0.2.0"
+version = "0.2.1"
 description = "Lightweight media crop and trim tool."
 readme = "README.md"
 requires-python = ">=3.8"
